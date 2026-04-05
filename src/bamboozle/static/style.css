@@ -21,11 +21,33 @@
     text-align: center;
 }
 
+/* Dashboard toolbar */
+.dashboard-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+}
+
 /* Camera controls */
 .camera-controls {
     display: flex;
     gap: 0.5rem;
-    margin-bottom: 1rem;
+}
+
+/* Sort controls */
+.sort-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.sort-controls select {
+    width: auto;
+    margin: 0;
+    padding: 0.3rem 2rem 0.3rem 0.8rem;
+    font-size: 0.85rem;
 }
 
 /* Printer Grid */

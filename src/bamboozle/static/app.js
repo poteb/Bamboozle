@@ -1,4 +1,10 @@
+const STATUS_PRIORITY = {
+    'RUNNING': 0, 'PAUSE': 1, 'PREPARE': 2, 'FINISH': 3, 'FAILED': 4, 'IDLE': 5, 'UNKNOWN': 6,
+};
+
 const ICO = {
+    sortAsc:    () => `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><polyline points="18 13 12 19 6 13"/></svg>`,
+    sortDesc:   () => `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><polyline points="6 11 12 5 18 11"/></svg>`,
     camera:     (c='currentColor') => `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>`,
     light:      (c='currentColor') => `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/><circle cx="12" cy="12" r="5"/></svg>`,
     expand:     () => `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>`,
@@ -16,7 +22,74 @@ class BamboozleApp {
         this.printers = {};
         this._poppedOut = new Set();
         this.grid = document.getElementById('printer-grid');
+
+        const saved = JSON.parse(localStorage.getItem('bamboozle-sort') || '{}');
+        this.sortBy = saved.sortBy || 'name';
+        this.sortDir = saved.sortDir || 'asc';
+        this._initSortControls();
+
         if (this.grid) this.connect();
+    }
+
+    _initSortControls() {
+        const select = document.getElementById('sort-by');
+        const btn = document.getElementById('sort-dir-btn');
+        if (select) select.value = this.sortBy;
+        if (btn) btn.innerHTML = this.sortDir === 'asc' ? ICO.sortAsc() : ICO.sortDesc();
+    }
+
+    _saveSortPref() {
+        localStorage.setItem('bamboozle-sort', JSON.stringify({ sortBy: this.sortBy, sortDir: this.sortDir }));
+    }
+
+    setSortBy(value) {
+        this.sortBy = value;
+        this._saveSortPref();
+        this.render();
+    }
+
+    toggleSortDir() {
+        this.sortDir = this.sortDir === 'asc' ? 'desc' : 'asc';
+        document.getElementById('sort-dir-btn').innerHTML =
+            this.sortDir === 'asc' ? ICO.sortAsc() : ICO.sortDesc();
+        this._saveSortPref();
+        this.render();
+    }
+
+    _sortedPrinters() {
+        const entries = Object.entries(this.printers);
+        const dir = this.sortDir === 'asc' ? 1 : -1;
+
+        entries.sort(([, a], [, b]) => {
+            let cmp = 0;
+            switch (this.sortBy) {
+                case 'name':
+                    cmp = a.name.localeCompare(b.name);
+                    break;
+                case 'status': {
+                    const ap = a.online ? (STATUS_PRIORITY[a.gcode_state] ?? 6) : 7;
+                    const bp = b.online ? (STATUS_PRIORITY[b.gcode_state] ?? 6) : 7;
+                    cmp = ap - bp;
+                    break;
+                }
+                case 'connection':
+                    cmp = (b.online ? 1 : 0) - (a.online ? 1 : 0);
+                    break;
+                case 'eta': {
+                    const aActive = a.gcode_state === 'RUNNING' || a.gcode_state === 'PAUSE';
+                    const bActive = b.gcode_state === 'RUNNING' || b.gcode_state === 'PAUSE';
+                    if (aActive !== bActive) {
+                        cmp = aActive ? -1 : 1;
+                    } else if (aActive) {
+                        cmp = (a.remaining_minutes || 0) - (b.remaining_minutes || 0);
+                    }
+                    break;
+                }
+            }
+            return cmp * dir;
+        });
+
+        return entries;
     }
 
     connect() {
@@ -43,19 +116,21 @@ class BamboozleApp {
         const loading = document.getElementById('loading-msg');
         if (loading) loading.remove();
 
-        for (const [id, state] of Object.entries(this.printers)) {
+        const sorted = this._sortedPrinters();
+
+        for (const [id, state] of sorted) {
             let card = this.grid.querySelector(`[data-printer-id="${id}"]`);
             if (!card) {
                 card = document.createElement('article');
                 card.className = 'printer-card';
                 card.dataset.printerId = id;
                 this.grid.appendChild(card);
-                // First render: build full card
                 card.innerHTML = this.renderCard(id, state);
             } else {
-                // Subsequent renders: update in-place to preserve MJPEG streams
                 this.updateCard(card, id, state);
             }
+            // Reorder: appendChild moves existing nodes without recreating them
+            this.grid.appendChild(card);
         }
 
         // Remove cards for printers no longer present
