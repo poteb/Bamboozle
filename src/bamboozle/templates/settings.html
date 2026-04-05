@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Printer Settings</h2>
+
+<article>
+    <header><h3 id="form-title">Add Printer</h3></header>
+    <form id="printer-form" onsubmit="return handlePrinterSubmit(event)">
+        <input type="hidden" id="edit-id" value="">
+        <div class="grid">
+            <label>
+                Name
+                <input type="text" id="printer-name" placeholder="e.g. Workshop P1S" required>
+            </label>
+            <label>
+                IP Address
+                <input type="text" id="printer-ip" placeholder="e.g. 192.168.1.50" required>
+            </label>
+        </div>
+        <div class="grid">
+            <label>
+                Access Code
+                <input type="text" id="printer-code" placeholder="From printer LCD" required>
+            </label>
+            <label>
+                Serial Number
+                <input type="text" id="printer-serial" placeholder="From printer LCD" required>
+            </label>
+        </div>
+        <label>
+            Camera Port
+            <select id="printer-camera-port">
+                <option value="6000">6000 (A1 / P1 / P1S series)</option>
+                <option value="322">322 (X1 / X1C / H2C / H2D / P2 series - requires ffmpeg)</option>
+            </select>
+        </label>
+        <label>
+            <input type="checkbox" id="printer-camera-enabled" role="switch">
+            Enable camera stream
+        </label>
+        <small>Requires "LAN Mode Liveview" on the printer and ffmpeg installed on this PC.</small>
+        <div class="grid" style="margin-top: 1rem;">
+            <button type="button" id="test-btn" class="secondary" onclick="testConnection()">Test Connection</button>
+            <button type="submit" id="save-btn">Add Printer</button>
+        </div>
+        <p id="test-result"></p>
+    </form>
+</article>
+
+<h3>Configured Printers</h3>
+{% if not printers %}
+<p>No printers configured yet.</p>
+{% else %}
+<div id="printer-list">
+    {% for p in printers %}
+    <article class="printer-entry" data-id="{{ p.id }}">
+        <div class="grid">
+            <div>
+                <strong>{{ p.name }}</strong><br>
+                <small>{{ p.ip }} &bull; Serial: {{ p.serial }} &bull; Camera: {{ "On" if p.camera_enabled else "Off" }} (port {{ p.camera_port }})</small>
+            </div>
+            <div style="text-align: right;">
+                <button class="outline secondary" onclick="editPrinter('{{ p.id }}', '{{ p.name }}', '{{ p.ip }}', '{{ p.access_code }}', '{{ p.serial }}', {{ p.camera_port }}, {{ 'true' if p.camera_enabled else 'false' }})">Edit</button>
+                <button class="outline" style="--pico-color: var(--pico-color-red-500);" onclick="deletePrinter('{{ p.id }}', '{{ p.name }}')">Delete</button>
+            </div>
+        </div>
+    </article>
+    {% endfor %}
+</div>
+{% endif %}
+
+<script>
+async function handlePrinterSubmit(e) {
+    e.preventDefault();
+    const editId = document.getElementById('edit-id').value;
+    const data = {
+        name: document.getElementById('printer-name').value,
+        ip: document.getElementById('printer-ip').value,
+        access_code: document.getElementById('printer-code').value,
+        serial: document.getElementById('printer-serial').value,
+        camera_port: parseInt(document.getElementById('printer-camera-port').value),
+        camera_enabled: document.getElementById('printer-camera-enabled').checked,
+    };
+
+    const url = editId ? `/api/printers/${editId}` : '/api/printers';
+    const method = editId ? 'PUT' : 'POST';
+
+    try {
+        const res = await fetch(url, {
+            method,
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data),
+        });
+        if (res.ok) {
+            window.location.reload();
+        } else {
+            const err = await res.json();
+            alert('Error: ' + (err.detail || 'Unknown error'));
+        }
+    } catch (err) {
+        alert('Network error: ' + err.message);
+    }
+}
+
+function editPrinter(id, name, ip, code, serial, cameraPort, cameraEnabled) {
+    document.getElementById('edit-id').value = id;
+    document.getElementById('printer-name').value = name;
+    document.getElementById('printer-ip').value = ip;
+    document.getElementById('printer-code').value = code;
+    document.getElementById('printer-serial').value = serial;
+    document.getElementById('printer-camera-port').value = cameraPort;
+    document.getElementById('printer-camera-enabled').checked = cameraEnabled;
+    document.getElementById('form-title').textContent = 'Edit Printer';
+    document.getElementById('save-btn').textContent = 'Update Printer';
+    window.scrollTo({top: 0, behavior: 'smooth'});
+}
+
+async function deletePrinter(id, name) {
+    if (!confirm(`Delete printer "${name}"?`)) return;
+    try {
+        const res = await fetch(`/api/printers/${id}`, {method: 'DELETE'});
+        if (res.ok) {
+            window.location.reload();
+        } else {
+            alert('Failed to delete printer');
+        }
+    } catch (err) {
+        alert('Network error: ' + err.message);
+    }
+}
+
+async function testConnection() {
+    const btn = document.getElementById('test-btn');
+    const result = document.getElementById('test-result');
+    btn.setAttribute('aria-busy', 'true');
+    btn.disabled = true;
+    result.textContent = 'Testing connection...';
+
+    const data = {
+        name: document.getElementById('printer-name').value || 'test',
+        ip: document.getElementById('printer-ip').value,
+        access_code: document.getElementById('printer-code').value,
+        serial: document.getElementById('printer-serial').value,
+        camera_port: parseInt(document.getElementById('printer-camera-port').value),
+    };
+
+    try {
+        const res = await fetch('/api/printers/test', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data),
+        });
+        const json = await res.json();
+        result.textContent = json.message;
+        result.style.color = json.success ? 'var(--pico-color-green-500)' : 'var(--pico-color-red-500)';
+    } catch (err) {
+        result.textContent = 'Network error: ' + err.message;
+        result.style.color = 'var(--pico-color-red-500)';
+    } finally {
+        btn.removeAttribute('aria-busy');
+        btn.disabled = false;
+    }
+}
+</script>
+{% endblock %}

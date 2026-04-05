@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block content %}
+{% if not has_printers %}
+<article class="welcome">
+    <header>
+        <h2>Welcome to Bamboozle</h2>
+    </header>
+    <p>No printers configured yet. Add your first Bambu Lab printer to get started.</p>
+    <a href="/settings" role="button">Add Printer</a>
+</article>
+{% else %}
+<div class="camera-controls">
+    <button class="outline small" onclick="app.toggleAllCameras(true)">All Cameras On</button>
+    <button class="outline small" onclick="app.toggleAllCameras(false)">All Cameras Off</button>
+</div>
+<div id="printer-grid" class="printer-grid">
+    <!-- Printer cards rendered by app.js via WebSocket -->
+    <p id="loading-msg">Connecting to printers...</p>
+</div>
+{% endif %}
+
+<div id="toast-container" class="toast-container"></div>
+{% endblock %}
