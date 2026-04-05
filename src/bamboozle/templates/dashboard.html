@@ -10,9 +10,20 @@
     <a href="/settings" role="button">Add Printer</a>
 </article>
 {% else %}
-<div class="camera-controls">
-    <button class="outline small" onclick="app.toggleAllCameras(true)">All Cameras On</button>
-    <button class="outline small" onclick="app.toggleAllCameras(false)">All Cameras Off</button>
+<div class="dashboard-toolbar">
+    <div class="camera-controls">
+        <button class="outline small" onclick="app.toggleAllCameras(true)">All Cameras On</button>
+        <button class="outline small" onclick="app.toggleAllCameras(false)">All Cameras Off</button>
+    </div>
+    <div class="sort-controls">
+        <select id="sort-by" class="outline small" onchange="app.setSortBy(this.value)">
+            <option value="name">Name</option>
+            <option value="status">Status</option>
+            <option value="connection">Connection</option>
+            <option value="eta">ETA</option>
+        </select>
+        <button id="sort-dir-btn" class="outline small icon-btn" onclick="app.toggleSortDir()" title="Reverse sort order"></button>
+    </div>
 </div>
 <div id="printer-grid" class="printer-grid">
     <!-- Printer cards rendered by app.js via WebSocket -->
