@@ -271,6 +271,15 @@
 .eta-value {
     font-size: 1.3rem;
     font-weight: bold;
+    color: #2196f3;
+}
+
+.eta-value.eta-green {
+    color: #4caf50;
+}
+
+.eta-value.eta-yellow {
+    color: #ff9800;
 }
 
 /* Temperatures */
