@@ -167,6 +167,8 @@ class BamboozleApp {
                 const eta = s.remaining_minutes > 0
                     ? `${Math.floor(s.remaining_minutes / 60)}h ${s.remaining_minutes % 60}m`
                     : '--';
+                const etaClass = s.remaining_minutes > 0 && s.remaining_minutes < 10 ? 'eta-green'
+                    : s.remaining_minutes > 0 && s.remaining_minutes < 30 ? 'eta-yellow' : '';
 
                 jobSection.innerHTML = `
                     <div class="file-name">${this.esc(s.file_name || 'Unknown file')}</div>
@@ -175,7 +177,7 @@ class BamboozleApp {
                         <span class="progress-pct">${s.progress}%</span>
                     </div>
                     <div class="detail-row">
-                        <span class="eta-value">ETA: ${eta}</span>
+                        <span class="eta-value ${etaClass}">ETA: ${eta}</span>
                     </div>`;
             } else {
                 jobSection.innerHTML = '';
@@ -362,6 +364,8 @@ class BamboozleApp {
         const eta = s.remaining_minutes > 0
             ? `${Math.floor(s.remaining_minutes / 60)}h ${s.remaining_minutes % 60}m`
             : '--';
+        const etaClass = s.remaining_minutes > 0 && s.remaining_minutes < 10 ? 'eta-green'
+            : s.remaining_minutes > 0 && s.remaining_minutes < 30 ? 'eta-yellow' : '';
 
         const nozzle = s.nozzle_temp != null ? `${Math.round(s.nozzle_temp)}` : '--';
         const bed = s.bed_temp != null ? `${Math.round(s.bed_temp)}` : '--';
@@ -422,7 +426,7 @@ class BamboozleApp {
                         <span class="progress-pct">${s.progress}%</span>
                     </div>
                     <div class="detail-row">
-                        <span class="eta-value">ETA: ${eta}</span>
+                        <span class="eta-value ${etaClass}">ETA: ${eta}</span>
                     </div>
                 ` : ''}</div>
                 <div class="temps-row">
