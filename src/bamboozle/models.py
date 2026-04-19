@@ -50,6 +50,7 @@ class PrinterState(BaseModel):
     camera_enabled: bool = False
     camera_available: bool = False
     has_thumbnail: bool = False
+    thumbnail_key: str = ""
     ams_trays: list[AMSTray] = []
     error_code: int = 0
     timestamp: float = Field(default_factory=time.time)

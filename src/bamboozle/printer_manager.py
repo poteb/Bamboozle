@@ -179,6 +179,7 @@ class PrinterConnection:
             camera_enabled=self.cfg.camera_enabled,
             camera_available=self.camera.available,
             has_thumbnail=self.thumbnail is not None,
+            thumbnail_key=self._thumb_fetched_for if self.thumbnail is not None else "",
             timestamp=time.time(),
         )
 

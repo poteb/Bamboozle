@@ -342,15 +342,21 @@ class BamboozleApp {
                 camFeed.innerHTML = '<span>Camera connecting...</span>';
             }
         } else if (wantThumbnail) {
+            const thumbUrl = `/stream/${id}/thumbnail?v=${encodeURIComponent(s.thumbnail_key || '')}`;
             if (!camFeed) {
                 camFeed = document.createElement('div');
                 camFeed.className = 'camera-feed thumbnail-feed';
-                camFeed.innerHTML = `<img src="/stream/${id}/thumbnail" alt="Model preview">`;
+                camFeed.innerHTML = `<img src="${thumbUrl}" alt="Model preview">`;
                 const header = card.querySelector('header');
                 header.after(camFeed);
-            } else if (!camFeed.querySelector('img[src*="/thumbnail"]')) {
-                camFeed.className = 'camera-feed thumbnail-feed';
-                camFeed.innerHTML = `<img src="/stream/${id}/thumbnail" alt="Model preview">`;
+            } else {
+                const existing = camFeed.querySelector('img[src*="/thumbnail"]');
+                if (!existing) {
+                    camFeed.className = 'camera-feed thumbnail-feed';
+                    camFeed.innerHTML = `<img src="${thumbUrl}" alt="Model preview">`;
+                } else if (existing.getAttribute('src') !== thumbUrl) {
+                    existing.setAttribute('src', thumbUrl);
+                }
             }
         } else if (camFeed) {
             camFeed.remove();
@@ -383,7 +389,7 @@ class BamboozleApp {
         } else if (s.camera_enabled && s.online) {
             cameraHtml = `<div class="camera-feed camera-offline"><span>Camera connecting...</span></div>`;
         } else if (!s.camera_enabled && s.has_thumbnail) {
-            cameraHtml = `<div class="camera-feed thumbnail-feed"><img src="/stream/${id}/thumbnail" alt="Model preview"></div>`;
+            cameraHtml = `<div class="camera-feed thumbnail-feed"><img src="/stream/${id}/thumbnail?v=${encodeURIComponent(s.thumbnail_key || '')}" alt="Model preview"></div>`;
         }
 
         let amsHtml = '';
