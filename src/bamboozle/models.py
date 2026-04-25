@@ -22,11 +22,14 @@ class AppConfig(BaseModel):
     poll_interval: float = 3.0
 
 
-class AMSTray(BaseModel):
-    tray_id: int = 0
-    filament_type: str = ""
-    color: str = ""
-    remaining: float = 0.0
+class Filament(BaseModel):
+    """A single loaded filament: AMS slot or external (vt_tray) spool."""
+    source: str = "ams"  # "ams" | "external"
+    ams_index: int = 0  # 0-based AMS unit index; ignored for external spool
+    tray_index: int = 0  # 0-based slot index within the AMS; ignored for external
+    color: str = ""  # CSS-ready color string, e.g. "#RRGGBB" or "#RRGGBBAA"
+    filament_type: str = ""  # e.g. "PLA", "PETG"
+    name: str = ""  # human-readable filament name (sub-brand or id-name)
 
 
 class PrinterState(BaseModel):
@@ -51,7 +54,7 @@ class PrinterState(BaseModel):
     camera_available: bool = False
     has_thumbnail: bool = False
     thumbnail_key: str = ""
-    ams_trays: list[AMSTray] = []
+    filaments: list[Filament] = []
     error_code: int = 0
     timestamp: float = Field(default_factory=time.time)
 

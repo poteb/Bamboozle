@@ -2,6 +2,113 @@ const STATUS_PRIORITY = {
     'RUNNING': 0, 'PAUSE': 1, 'PREPARE': 2, 'FINISH': 3, 'FAILED': 4, 'IDLE': 5, 'UNKNOWN': 6,
 };
 
+// Bambu Lab filament color catalog — hex -> human-readable name.
+// PLA Basic and PLA Matte sourced from Bambu Lab's official color PDFs.
+// PETG HF / ABS / Silks etc. are best-effort from BambuStudio profiles and may
+// drift from firmware-reported hex. Keys are uppercase 6-digit hex without alpha.
+const BAMBU_COLOR_NAMES = {
+    // PLA Basic (official)
+    'FFFFFF': 'Jade White',
+    'EC008C': 'Magenta',
+    'E4BD68': 'Gold',
+    '3F8E43': 'Mistletoe Green',
+    'C12E1F': 'Red',
+    '5E43B7': 'Purple',
+    'F7E6DE': 'Beige',
+    'F55A74': 'Pink',
+    'FEC600': 'Sunflower Yellow',
+    '847D48': 'Bronze',
+    '00B1B7': 'Turquoise',
+    '482960': 'Indigo Purple',
+    'D1D3D5': 'Light Gray',
+    'F5547C': 'Hot Pink',
+    'F4EE2A': 'Yellow',
+    '6F5034': 'Cocoa Brown',
+    '0086D6': 'Cyan',
+    '5B6579': 'Blue Grey',
+    'A6A9AA': 'Silver',
+    'FF6A13': 'Orange',
+    'BECF00': 'Bright Green',
+    '9D432C': 'Brown',
+    '0A2989': 'Blue',
+    '545454': 'Dark Gray',
+    '8E9089': 'Gray',
+    'FF9016': 'Pumpkin Orange',
+    '00AE42': 'Bambu Green',
+    '9D2235': 'Maroon Red',
+    '0056B8': 'Cobalt Blue',
+    '000000': 'Black',
+
+    // PLA Matte (official)
+    // Note: Matte's "Ivory White" (FFFFFF) and "Charcoal" (000000) collide with
+    // Basic's "Jade White" / "Black"; Basic wins since the table is hex-keyed.
+    'CBC6B8': 'Bone White',
+    'E8DBB7': 'Desert Tan',
+    'D3B7A7': 'Latte Brown',
+    'AE835B': 'Caramel',
+    'B15533': 'Terracotta',
+    '7D6556': 'Dark Brown',
+    '4D3324': 'Dark Chocolate',
+    'AE96D4': 'Lilac Purple',
+    'E8AFCF': 'Sakura Pink',
+    'F99963': 'Mandarin Orange',
+    'F7D959': 'Lemon Yellow',
+    '950051': 'Plum',
+    'DE4343': 'Scarlet Red',
+    'BB3D43': 'Dark Red',
+    '68724D': 'Dark Green',
+    '61C680': 'Grass Green',
+    'C2E189': 'Apple Green',
+    'A3D8E1': 'Ice Blue',
+    '56B7E6': 'Sky Blue',
+    '0078BF': 'Marine Blue',
+    '042F56': 'Dark Blue',
+    '9B9EA0': 'Ash Gray',
+    '757575': 'Nardo Gray',
+
+    // PETG HF / Translucent
+    'F2EFE6': 'Cream',
+    'D5C9A8': 'Beige',
+    'C6B7A0': 'Khaki',
+    'E94B3C': 'Coral Red',
+    'E37947': 'Terracotta',
+    'F8B17E': 'Peach',
+    '5BCEFA': 'Cyan',
+    '2E96E1': 'Solid Blue',
+    '69BFD3': 'Lake Blue',
+
+    // ABS
+    'F5F5DC': 'Bone White',
+    '273B5F': 'Navy Blue',
+
+    // Silks / Galaxy / Sparkle
+    'C9A862': 'Silk Gold',
+    'B8B8B8': 'Silk Silver',
+    'C76B27': 'Silk Copper',
+    '88C9F2': 'Galaxy Blue',
+    '4D4DA0': 'Galaxy Purple',
+    '5C9D52': 'Galaxy Green',
+    '2A1A35': 'Galaxy Black',
+    '2A2C30': 'Sparkle Black',
+};
+
+function normalizeHex(color) {
+    if (!color || typeof color !== 'string') return null;
+    let s = color.trim();
+    if (s.startsWith('#')) s = s.slice(1);
+    // Drop alpha — accept #RRGGBB, #RRGGBBAA. Anything else: fallback.
+    if (s.length === 8) s = s.slice(0, 6);
+    if (s.length !== 6) return null;
+    if (!/^[0-9a-fA-F]{6}$/.test(s)) return null;
+    return s.toUpperCase();
+}
+
+function colorNameFromHex(color) {
+    const hex = normalizeHex(color);
+    if (!hex) return null;
+    return BAMBU_COLOR_NAMES[hex] || null;
+}
+
 const ICO = {
     sortAsc:    () => `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><polyline points="18 13 12 19 6 13"/></svg>`,
     sortDesc:   () => `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><polyline points="6 11 12 5 18 11"/></svg>`,
@@ -21,12 +128,14 @@ class BamboozleApp {
         this.ws = null;
         this.printers = {};
         this._poppedOut = new Set();
+        this._expandedFilaments = new Set();
         this.grid = document.getElementById('printer-grid');
 
         const saved = JSON.parse(localStorage.getItem('bamboozle-sort') || '{}');
         this.sortBy = saved.sortBy || 'name';
         this.sortDir = saved.sortDir || 'asc';
         this._initSortControls();
+        this._updateAllCamsToggle();
 
         if (this.grid) this.connect();
     }
@@ -115,6 +224,8 @@ class BamboozleApp {
         if (!this.grid) return;
         const loading = document.getElementById('loading-msg');
         if (loading) loading.remove();
+
+        this._updateAllCamsToggle();
 
         const sorted = this._sortedPrinters();
 
@@ -205,6 +316,31 @@ class BamboozleApp {
             speedRow.innerHTML = `<span class="temp-label">Speed</span><span>${s.print_speed}%</span>`;
         } else if (speedRow) {
             speedRow.remove();
+        }
+
+        // Update filaments row (AMS + external spool)
+        let filamentsRow = card.querySelector('.filaments-row');
+        const filamentsHtml = this._renderFilaments(s, id);
+        if (filamentsHtml) {
+            if (!filamentsRow) {
+                const bottom = card.querySelector('.card-bottom');
+                const actionsEl = bottom?.querySelector('.actions');
+                if (bottom && actionsEl) {
+                    bottom.insertAdjacentHTML('beforeend', filamentsHtml);
+                    // The new row was appended after .actions; move it before .actions to match initial render order.
+                    filamentsRow = card.querySelector('.filaments-row');
+                    if (filamentsRow) bottom.insertBefore(filamentsRow, actionsEl);
+                }
+            } else {
+                // Replace contents in place to update colors/tooltips, and refresh class to reflect expanded state.
+                const tmp = document.createElement('div');
+                tmp.innerHTML = filamentsHtml;
+                const fresh = tmp.firstElementChild;
+                filamentsRow.className = fresh.className;
+                filamentsRow.innerHTML = fresh.innerHTML;
+            }
+        } else if (filamentsRow) {
+            filamentsRow.remove();
         }
 
         // Update action buttons (div always exists, just update contents)
@@ -363,6 +499,100 @@ class BamboozleApp {
         }
     }
 
+    _filamentTooltip(f) {
+        const parts = [];
+        if (f.color) {
+            const colorLabel = colorNameFromHex(f.color) || f.color;
+            parts.push(colorLabel);
+        }
+        const name = f.name || f.filament_type;
+        if (name) parts.push(name);
+        if (f.source === 'external') {
+            parts.push('External spool');
+        } else {
+            parts.push(`AMS ${(f.ams_index ?? 0) + 1} · Slot ${(f.tray_index ?? 0) + 1}`);
+        }
+        return parts.join(' · ');
+    }
+
+    _filamentLabelExpanded(f) {
+        // Expanded view: just color name + filament type. Location is shown in the group header.
+        const parts = [];
+        if (f.color) {
+            const colorLabel = colorNameFromHex(f.color) || f.color;
+            parts.push(colorLabel);
+        }
+        const name = f.name || f.filament_type;
+        if (name) parts.push(name);
+        return parts.join(' · ');
+    }
+
+    _renderFilaments(s, id) {
+        if (!s.filaments || s.filaments.length === 0) return '';
+        const expanded = this._expandedFilaments.has(id);
+
+        // Bucket filaments by group: AMS units (numeric ascending on ams_index) then external last.
+        const amsBuckets = new Map(); // ams_index -> filament[]
+        const externalBucket = [];
+        for (const f of s.filaments) {
+            if (f.source === 'external') {
+                externalBucket.push(f);
+            } else {
+                const idx = (typeof f.ams_index === 'number') ? f.ams_index : 0;
+                if (!amsBuckets.has(idx)) amsBuckets.set(idx, []);
+                amsBuckets.get(idx).push(f);
+            }
+        }
+        const orderedAmsKeys = Array.from(amsBuckets.keys()).sort((a, b) => a - b);
+        const groups = orderedAmsKeys.map(k => ({ kind: 'ams', amsIndex: k, items: amsBuckets.get(k) }));
+        if (externalBucket.length > 0) groups.push({ kind: 'external', items: externalBucket });
+
+        const renderGroup = (group) => {
+            const items = group.items.map(f => {
+                const cls = f.source === 'external' ? 'filament-square external' : 'filament-square';
+                const bg = f.color || 'transparent';
+                const tip = this.esc(this._filamentTooltip(f));
+                const square = `<span class="${cls}" style="background:${bg}" title="${tip}"></span>`;
+                if (expanded) {
+                    const label = this.esc(this._filamentLabelExpanded(f));
+                    return `<div class="filament-row-item">${square}<span class="filament-label">${label}</span></div>`;
+                }
+                return square;
+            }).join('');
+            let header = '';
+            if (expanded) {
+                const headerText = group.kind === 'external' ? 'External' : `AMS ${group.amsIndex + 1}`;
+                header = `<div class="filament-group-header">${this.esc(headerText)}</div>`;
+            }
+            return `<div class="filament-group">${header}${items}</div>`;
+        };
+
+        const groupsHtml = groups.map(renderGroup).join('');
+        const rowClass = expanded ? 'filaments-row expanded' : 'filaments-row';
+        return `<div class="${rowClass}" onclick="app.toggleFilamentsExpanded('${id}')">${groupsHtml}</div>`;
+    }
+
+    toggleFilamentsExpanded(id) {
+        if (this._expandedFilaments.has(id)) {
+            this._expandedFilaments.delete(id);
+        } else {
+            this._expandedFilaments.add(id);
+        }
+        const card = this.grid?.querySelector(`[data-printer-id="${id}"]`);
+        if (!card) return;
+        const s = this.printers[id];
+        if (!s) return;
+        const filamentsRow = card.querySelector('.filaments-row');
+        const filamentsHtml = this._renderFilaments(s, id);
+        if (filamentsRow && filamentsHtml) {
+            const tmp = document.createElement('div');
+            tmp.innerHTML = filamentsHtml;
+            const fresh = tmp.firstElementChild;
+            filamentsRow.className = fresh.className;
+            filamentsRow.innerHTML = fresh.innerHTML;
+        }
+    }
+
     renderCard(id, s) {
         const statusClass = this.getStatusClass(s);
         const statusLabel = this.getStatusLabel(s);
@@ -392,13 +622,7 @@ class BamboozleApp {
             cameraHtml = `<div class="camera-feed thumbnail-feed"><img src="/stream/${id}/thumbnail?v=${encodeURIComponent(s.thumbnail_key || '')}" alt="Model preview"></div>`;
         }
 
-        let amsHtml = '';
-        if (s.ams_trays && s.ams_trays.length > 0) {
-            const trays = s.ams_trays.map(t =>
-                `<span class="ams-tray" style="background:${t.color || '#555'}" title="${t.filament_type || 'Empty'}"></span>`
-            ).join('');
-            amsHtml = `<div class="ams-row">${trays}</div>`;
-        }
+        const filamentsHtml = this._renderFilaments(s, id);
 
         let actionsHtml = '';
         if (hasJob) {
@@ -455,7 +679,7 @@ class BamboozleApp {
                         <span>${s.print_speed}%</span>
                     </div>
                 ` : ''}
-                ${amsHtml}
+                ${filamentsHtml}
                 <div class="actions">${actionsHtml}</div>
             </div>
         `;
@@ -485,6 +709,17 @@ class BamboozleApp {
             case 'IDLE': return 'Idle';
             default: return s.gcode_state;
         }
+    }
+
+    _updateAllCamsToggle() {
+        const btn = document.getElementById('all-cams-toggle');
+        if (!btn) return;
+        const onlineIds = Object.keys(this.printers).filter(id => this.printers[id].online);
+        const allOn = onlineIds.length > 0 && onlineIds.every(id => this.printers[id].camera_enabled === true);
+        const color = allOn ? '#4caf50' : '#888';
+        btn.innerHTML = `<span class="all-cams-label">All</span>${ICO.camera(color)}`;
+        btn.title = allOn ? 'Disable all cameras' : 'Enable all cameras';
+        btn.setAttribute('onclick', `app.toggleAllCameras(${!allOn})`);
     }
 
     async toggleAllCameras(enabled) {

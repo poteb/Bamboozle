@@ -12,8 +12,7 @@
 {% else %}
 <div class="dashboard-toolbar">
     <div class="camera-controls">
-        <button class="outline small" onclick="app.toggleAllCameras(true)">All Cameras On</button>
-        <button class="outline small" onclick="app.toggleAllCameras(false)">All Cameras Off</button>
+        <button id="all-cams-toggle" class="outline small all-cams-btn" onclick="app.toggleAllCameras(true)" title="Enable all cameras"></button>
     </div>
     <div class="sort-controls">
         <select id="sort-by" class="outline small" onchange="app.setSortBy(this.value)">

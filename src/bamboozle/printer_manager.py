@@ -10,7 +10,7 @@ from fastapi import WebSocket
 
 from .camera import CameraStream
 from .config import save_config
-from .models import AMSTray, AppConfig, PrinterConfig, PrinterState
+from .models import AppConfig, Filament, PrinterConfig, PrinterState
 from .thumbnail import fetch_thumbnail
 
 logger = logging.getLogger(__name__)
@@ -139,6 +139,8 @@ class PrinterConnection:
         except Exception:
             subtask = ""
 
+        filaments = self._read_filaments()
+
         online = gcode_str != "UNKNOWN" or nozzle_temp is not None
 
         # Fetch thumbnail when a new print job is detected
@@ -180,8 +182,265 @@ class PrinterConnection:
             camera_available=self.camera.available,
             has_thumbnail=self.thumbnail is not None,
             thumbnail_key=self._thumb_fetched_for if self.thumbnail is not None else "",
+            filaments=filaments,
             timestamp=time.time(),
         )
+
+    # --- Filament helpers -------------------------------------------------
+
+    @staticmethod
+    def _normalize_tray_color(raw: Any) -> str:
+        """Convert a Bambu tray_color (e.g. 'RRGGBB' or 'RRGGBBAA') to a CSS color.
+
+        Bambu firmware emits 8-char RRGGBBAA hex (alpha last). Browsers also
+        accept 8-digit hex. Returns empty string when input is unusable.
+
+        The all-zero value ('00000000' / '000000') is the firmware default
+        for empty / unidentified slots — treat it as no color so callers can
+        skip those entries.
+        """
+        if not raw:
+            return ""
+        if not isinstance(raw, str):
+            return ""
+        s = raw.strip().lstrip("#")
+        if len(s) not in (6, 8):
+            return ""
+        try:
+            value = int(s, 16)
+        except ValueError:
+            return ""
+        if value == 0:
+            return ""
+        return f"#{s.upper()}"
+
+    @staticmethod
+    def _filament_label(tray: Any) -> tuple[str, str]:
+        """Return (filament_type, friendly_name) from a FilamentTray.
+
+        Falls back gracefully if any field is missing.
+        """
+        ftype = ""
+        name = ""
+        try:
+            ftype = getattr(tray, "tray_type", "") or ""
+        except Exception:
+            ftype = ""
+        try:
+            name = (
+                getattr(tray, "tray_sub_brands", "")
+                or getattr(tray, "tray_id_name", "")
+                or ""
+            )
+        except Exception:
+            name = ""
+        return ftype, name
+
+    @staticmethod
+    def _filament_from_dict(
+        tray: dict, source: str, ams_index: int, tray_index: int
+    ) -> Filament | None:
+        """Build a Filament from a raw MQTT tray dict.
+
+        Returns None if the tray has no useful info (empty slot).
+        Mirrors the same defensive shape used for the FilamentTray dataclass.
+        """
+        if not isinstance(tray, dict):
+            return None
+        color = PrinterConnection._normalize_tray_color(tray.get("tray_color", ""))
+        ftype = tray.get("tray_type", "") or ""
+        fname = tray.get("tray_sub_brands", "") or tray.get("tray_id_name", "") or ""
+        if not color and not ftype and not fname:
+            return None
+        return Filament(
+            source=source,
+            ams_index=ams_index,
+            tray_index=tray_index,
+            color=color,
+            filament_type=str(ftype),
+            name=str(fname),
+        )
+
+    def _read_filaments_from_dump(self) -> list[Filament] | None:
+        """Read filaments straight from the raw MQTT print payload.
+
+        Used for dual-extruder models (H2C / H2D) where the bambulabs_api
+        helpers don't surface filament data:
+          * `vt_tray()` is replaced by a `vir_slot` list (one entry per
+            extruder, ids 254 / 253).
+          * AMS trays omit the legacy `n` field, so the library's
+            `process_ams()` silently drops them.
+
+        Reading the raw payload also covers single-extruder models, but we
+        only return a non-None list when we actually find something useful;
+        otherwise we let the caller fall back to the library helpers.
+        """
+        try:
+            dump = self.printer.mqtt_dump() or {}
+        except Exception as e:
+            logger.debug("mqtt_dump() failed for %s: %s", self.cfg.name, e)
+            return None
+
+        print_payload = dump.get("print") if isinstance(dump, dict) else None
+        if not isinstance(print_payload, dict):
+            return None
+
+        out: list[Filament] = []
+        found_ams_block = False
+        found_external_block = False
+
+        # --- AMS trays --------------------------------------------------
+        try:
+            ams_block = print_payload.get("ams")
+            if isinstance(ams_block, dict):
+                exist_bits = ams_block.get("ams_exist_bits", "0")
+                ams_units = ams_block.get("ams", [])
+                if (str(exist_bits) not in ("0", "")) and isinstance(ams_units, list):
+                    found_ams_block = True
+                    for unit_idx, unit in enumerate(ams_units):
+                        if not isinstance(unit, dict):
+                            continue
+                        try:
+                            ams_index = int(unit.get("id", unit_idx))
+                        except (TypeError, ValueError):
+                            ams_index = unit_idx
+                        trays = unit.get("tray", [])
+                        if not isinstance(trays, list):
+                            continue
+                        for slot_idx, tray in enumerate(trays):
+                            if not isinstance(tray, dict):
+                                continue
+                            try:
+                                tray_index = int(tray.get("id", slot_idx))
+                            except (TypeError, ValueError):
+                                tray_index = slot_idx
+                            f = self._filament_from_dict(
+                                tray, "ams", ams_index, tray_index
+                            )
+                            if f is not None:
+                                out.append(f)
+        except Exception as e:
+            logger.debug("Raw AMS parse failed for %s: %s", self.cfg.name, e)
+
+        # --- External spool(s) -----------------------------------------
+        # H2C / H2D: list of per-extruder virtual slots.
+        try:
+            vir_slot = print_payload.get("vir_slot")
+            if isinstance(vir_slot, list) and vir_slot:
+                found_external_block = True
+                for ext_idx, slot in enumerate(vir_slot):
+                    if not isinstance(slot, dict):
+                        continue
+                    f = self._filament_from_dict(
+                        slot, "external", ext_idx, 0
+                    )
+                    if f is not None:
+                        out.append(f)
+        except Exception as e:
+            logger.debug("vir_slot parse failed for %s: %s", self.cfg.name, e)
+
+        # Single-extruder fallback inside the dump.
+        if not found_external_block:
+            try:
+                vt = print_payload.get("vt_tray")
+                if isinstance(vt, dict) and vt:
+                    found_external_block = True
+                    f = self._filament_from_dict(vt, "external", 0, 0)
+                    if f is not None:
+                        out.append(f)
+            except Exception as e:
+                logger.debug("vt_tray dump parse failed for %s: %s", self.cfg.name, e)
+
+        # If neither AMS nor external blocks were present in the dump,
+        # the payload hasn't arrived yet — let the caller fall back to the
+        # library helpers (which are also no-ops in that case but keep the
+        # original control flow intact).
+        if not found_ams_block and not found_external_block:
+            return None
+        return out
+
+    def _read_filaments_from_library(self) -> list[Filament]:
+        """Original code path: use bambulabs_api helpers.
+
+        Works for P1P/P1S/X1/A1 single-extruder models. Skips dual-extruder
+        models (H2C/H2D) because their MQTT payload differs (see
+        `_read_filaments_from_dump`).
+        """
+        out: list[Filament] = []
+        p = self.printer
+
+        # AMS units (zero or more)
+        try:
+            hub = p.ams_hub()
+            ams_map = getattr(hub, "ams_hub", {}) or {}
+            for ams_index, ams_unit in ams_map.items():
+                trays = getattr(ams_unit, "filament_trays", {}) or {}
+                for tray_index, tray in trays.items():
+                    if tray is None:
+                        continue
+                    color = self._normalize_tray_color(
+                        getattr(tray, "tray_color", "")
+                    )
+                    ftype, fname = self._filament_label(tray)
+                    if not color and not ftype and not fname:
+                        # Slot is empty / unidentified, skip it.
+                        continue
+                    out.append(
+                        Filament(
+                            source="ams",
+                            ams_index=int(ams_index),
+                            tray_index=int(tray_index),
+                            color=color,
+                            filament_type=ftype,
+                            name=fname,
+                        )
+                    )
+        except Exception as e:
+            logger.debug("AMS read failed for %s: %s", self.cfg.name, e)
+
+        # External spool (vt_tray). May raise or return an empty/blank tray.
+        try:
+            vt = p.vt_tray()
+            if vt is not None:
+                color = self._normalize_tray_color(getattr(vt, "tray_color", ""))
+                ftype, fname = self._filament_label(vt)
+                if color or ftype or fname:
+                    out.append(
+                        Filament(
+                            source="external",
+                            ams_index=0,
+                            tray_index=0,
+                            color=color,
+                            filament_type=ftype,
+                            name=fname,
+                        )
+                    )
+        except Exception as e:
+            logger.debug("vt_tray read failed for %s: %s", self.cfg.name, e)
+
+        return out
+
+    def _read_filaments(self) -> list[Filament]:
+        """Read AMS trays + external spool defensively. Always returns a list.
+
+        Strategy: parse the raw MQTT print payload first — that's the only
+        path that handles dual-extruder models (H2C/H2D), where the
+        bambulabs_api helpers return nothing because the payload uses
+        `vir_slot` instead of `vt_tray` and AMS trays omit the legacy `n`
+        field that `process_ams()` filters on.
+
+        If the dump path doesn't surface any filament blocks (e.g. the
+        first few polls before a full `pushall` arrives), fall back to the
+        library helpers so we don't regress on already-working models.
+        """
+        try:
+            from_dump = self._read_filaments_from_dump()
+        except Exception as e:
+            logger.debug("Dump-based filament read failed for %s: %s", self.cfg.name, e)
+            from_dump = None
+        if from_dump is not None:
+            return from_dump
+        return self._read_filaments_from_library()
 
 
 class PrinterManager:

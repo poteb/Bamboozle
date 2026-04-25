@@ -61,3 +61,36 @@ Both protocols run in a dedicated thread with exponential backoff reconnect (3s 
 - `stream.py` — MJPEG camera passthrough.
 
 **Frontend** is plain HTML/JS/CSS in `bamboozle/templates/` and `bamboozle/static/` (no build step). The dashboard opens a WebSocket and re-renders on each `update` message.
+
+## Task workflow (Docket)
+
+Tasks live as one file per task under `Tasks/`, named `YYYYMMDD-HHMMSS-slug.md` (UTC timestamp + kebab-case slug, e.g. `20260419-145321-scaffold.md`). The timestamp keeps filenames unique across contributors without coordination. `Tasks/done/` (the archive) IS the log — listed chronologically by filename.
+
+- **The user creates** task files in the main conversation. Initial Status is `todo` with a description of the work.
+- **Do NOT execute tasks in the main conversation.** Execution is always delegated to a sub-agent, so the main conversation stays free for the user to queue more tasks. When the user says "Proceed", do not open the task file and start working — dispatch a sub-agent instead. It takes the **earliest** `todo` task (smallest filename = oldest-created). "Proceed with `<slug>`" dispatches for the task whose slug matches.
+- **Claude Code dispatch**: use the `Agent` tool with `subagent_type: general-purpose` and `run_in_background: true`. Other agents: use your platform's equivalent sub-agent / background-task mechanism.
+- **The sub-agent does the bookkeeping**: Status → `in progress`, append progress/decisions/findings to `## Notes` as it works, Status → `done` when finished, and move the file from `Tasks/` to `Tasks/done/`.
+- **If the sub-agent needs input**, it sets Status to `blocked`, writes the question in `## Questions`, and returns. The main conversation flags it in chat so the user can answer. Auto-proceed pauses until the user responds.
+- **Auto-proceed**: when a sub-agent finishes a task cleanly (status `done`), immediately dispatch the next-earliest `todo` task in a fresh sub-agent, with no prompt from the user. Surface a one-line "`<slug>` done; starting `<next-slug>`" update in chat. Stop auto-proceeding when: (a) no `todo` tasks remain, (b) a task ends `blocked`, (c) the sub-agent errors or fails verification, or (d) the user says "stop" or "pause".
+- **Brief the sub-agent well**: sub-agents start with no conversation context. The dispatch prompt must tell the sub-agent to read its task file by path, follow these workflow rules, and include any decisions from prior tasks it needs. Point it at relevant files by path.
+
+### Status vocabulary
+`todo` | `in progress` | `blocked` | `done`
+
+### Task file template
+
+````markdown
+# <title>
+
+## Status
+todo  <!-- todo | in progress | blocked | done -->
+
+## Task
+<what needs to be done>
+
+## Notes
+<agent appends progress, decisions, findings as work proceeds>
+
+## Questions
+<optional; only when status is blocked>
+````
