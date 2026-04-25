@@ -1,0 +1,15 @@
+INFO:     127.0.0.1:49486 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49486 - "GET /static/app.js?v=35 HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:49496 - "GET /api/printers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49503 - "GET /api/printers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49509 - "PUT /api/printers/4b99ae4da105 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49535 - "GET /api/printers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49543 - "GET /settings HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49543 - "GET /static/style.css?v=35 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49552 - "GET /settings HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49562 - "PUT /api/printers/be3234ca6278 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49562 - "GET /api/printers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49562 - "PUT /api/printers/be3234ca6278 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49562 - "GET /api/printers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49598 - "PUT /api/printers/4b99ae4da105 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49598 - "GET /api/printers HTTP/1.1" 200 OK

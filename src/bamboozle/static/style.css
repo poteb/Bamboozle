@@ -1,6 +1,15 @@
 /* Bamboozle - Custom styles on top of Pico CSS */
 
+/* Denser, desktop-oriented look: tighten Pico's tablet-touch defaults so
+   buttons, inputs, selects, and form rows feel compact on a desktop PC.
+   These cascade into the dark theme via :root inheritance. */
 :root {
+    --pico-spacing: 0.7rem;                     /* default 1rem */
+    --pico-form-element-spacing-vertical: 0.45rem;   /* default 0.75rem */
+    --pico-form-element-spacing-horizontal: 0.7rem;  /* default 1rem */
+    --pico-font-size: 95%;                      /* default 100% */
+    --pico-line-height: 1.45;                   /* default 1.5 */
+
     --status-printing: #4caf50;
     --status-idle: #2196f3;
     --status-paused: #ff9800;
@@ -85,7 +94,7 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    padding: 1rem 1.2rem;
+    padding: 0.7rem 0.9rem;
     margin: 0;
     border-bottom: none;
 }
@@ -101,17 +110,17 @@
 }
 
 .printer-card .actions {
-    padding: 0.8rem 1.2rem;
+    padding: 0.55rem 0.9rem;
     display: flex;
     gap: 0.5rem;
     justify-content: flex-end;
     align-items: center;
-    min-height: 3.5rem;
+    min-height: 3rem;
 }
 
 .printer-card > div,
 .printer-card > .file-name {
-    padding: 0 1.2rem;
+    padding: 0 0.9rem;
 }
 
 /* Status dot */
@@ -255,7 +264,7 @@
     display: flex;
     align-items: center;
     gap: 0.8rem;
-    padding: 0.5rem 1.2rem;
+    padding: 0.4rem 0.9rem;
 }
 
 .progress-row progress {
@@ -273,7 +282,7 @@
 .detail-row {
     display: flex;
     justify-content: center;
-    padding: 0.2rem 1.2rem 0.5rem;
+    padding: 0.15rem 0.9rem 0.4rem;
 }
 
 .eta-value {
@@ -294,7 +303,7 @@
 .temps-row {
     display: flex;
     gap: 1rem;
-    padding: 0.8rem 1.2rem;
+    padding: 0.55rem 0.9rem;
     justify-content: space-around;
 }
 
@@ -319,7 +328,7 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    padding: 0 1.2rem 0.5rem;
+    padding: 0 0.9rem 0.4rem;
     justify-content: center;
 }
 
@@ -327,7 +336,7 @@
 .filaments-row {
     display: flex;
     gap: 0.5rem;
-    padding: 0.5rem 1.2rem;
+    padding: 0.4rem 0.9rem;
     justify-content: center;
     flex-wrap: wrap;
     cursor: pointer;
@@ -465,6 +474,190 @@
 
 @keyframes fadeOut {
     to { opacity: 0; }
+}
+
+/* Printer settings form (Add / Edit Printer) */
+.printer-form {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.2rem;
+    align-items: start;
+}
+
+.printer-form .form-col {
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+}
+
+.printer-form .form-submit-row {
+    grid-column: 1 / -1;
+}
+
+.printer-form .form-submit-row button {
+    width: 100%;
+    margin: 0;
+}
+
+.printer-form .connection-group {
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 5px;
+    padding: 0.6rem 0.8rem 0.7rem;
+    margin: 0;
+}
+
+.printer-form .connection-group > legend {
+    padding: 0 0.4rem;
+    font-weight: bold;
+    font-size: 1rem;
+    opacity: 0.9;
+}
+
+.printer-form .connection-group #test-btn {
+    margin-top: 0.5rem;
+}
+
+.printer-form .connection-group #test-result {
+    margin: 0.5rem 0 0;
+    font-size: 0.9rem;
+}
+
+@media (max-width: 760px) {
+    .printer-form {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* Settings page two-pane layout: sidebar + form */
+.settings-layout {
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    gap: 1.5rem;
+    align-items: start;
+}
+
+.printer-sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+}
+
+.printer-sidebar .new-btn {
+    width: 100%;
+    margin: 0;
+}
+
+.printer-sidebar .printer-filter-wrap {
+    position: relative;
+    margin: 0 0 0.2rem;
+}
+
+.printer-sidebar .printer-filter {
+    width: 100%;
+    box-sizing: border-box;
+    margin: 0;
+    padding-right: 1.8rem;
+}
+
+.printer-sidebar .printer-filter-clear {
+    position: absolute;
+    top: 50%;
+    right: 0.4rem;
+    transform: translateY(-50%);
+    width: auto;
+    margin: 0;
+    padding: 0 0.3rem;
+    background: transparent;
+    border: none;
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 1.1rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.printer-sidebar .printer-filter-clear:hover {
+    color: rgba(255, 255, 255, 0.9);
+    background: transparent;
+}
+
+.printer-sidebar .printer-filter-clear:focus {
+    outline: none;
+    color: rgba(255, 255, 255, 0.9);
+}
+
+.printer-sidebar ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+
+.printer-sidebar li {
+    margin: 0;
+    padding: 0;
+}
+
+.printer-sidebar .printer-link {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    color: inherit;
+    border: none;
+    border-left: 3px solid transparent;
+    padding: 0.5rem 0.7rem;
+    margin: 0;
+    border-radius: 4px;
+    font: inherit;
+    cursor: pointer;
+    text-decoration: none;
+}
+
+.printer-sidebar .printer-link:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.printer-sidebar .printer-link.selected {
+    background: rgba(255, 255, 255, 0.08);
+    border-left-color: var(--pico-primary, #2196f3);
+}
+
+.printer-sidebar .empty-note {
+    font-size: 0.85rem;
+    opacity: 0.7;
+    margin: 0;
+    padding: 0.3rem 0.7rem;
+}
+
+.printer-form .form-submit-row {
+    display: flex;
+    gap: 0.6rem;
+    align-items: center;
+}
+
+.printer-form .form-submit-row #save-btn {
+    flex: 1;
+}
+
+.printer-form .form-submit-row #delete-btn {
+    width: auto;
+    margin: 0;
+    --pico-color: var(--pico-color-red-500);
+    border-color: var(--pico-color-red-500);
+}
+
+.form-placeholder p {
+    margin: 0;
+    opacity: 0.65;
+    font-size: 0.95rem;
+}
+
+@media (max-width: 760px) {
+    .settings-layout {
+        grid-template-columns: 1fr;
+    }
 }
 
 /* Responsive */

@@ -2,18 +2,37 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import bambulabs_api as bl
 from fastapi import WebSocket
 
 from .camera import CameraStream
-from .config import save_config
+from .config import _config_dir, save_config
 from .models import AppConfig, Filament, PrinterConfig, PrinterState
 from .thumbnail import fetch_thumbnail
 
 logger = logging.getLogger(__name__)
+
+
+def _backup_printer_config(cfg: PrinterConfig) -> Path:
+    """Snapshot a PrinterConfig to %LOCALAPPDATA%\\Bamboozle\\history\\.
+
+    Filename: ``{sanitized_name}.{YYYYMMDD-HHMMSS}.json`` (UTC, second precision).
+    Names are sanitized by replacing any character not in ``[A-Za-z0-9_-]`` with
+    ``_``. If the sanitized name is empty, fall back to ``cfg.id``.
+    """
+    history_dir = _config_dir() / "history"
+    history_dir.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", cfg.name) or cfg.id
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    path = history_dir / f"{safe}.{ts}.json"
+    path.write_text(cfg.model_dump_json(indent=2), encoding="utf-8")
+    return path
 
 
 class PrinterConnection:
@@ -24,7 +43,7 @@ class PrinterConnection:
         self.cfg.camera_enabled = False  # Always start with cameras off
         self.printer = bl.Printer(cfg.ip, cfg.access_code, cfg.serial)
         self.camera = CameraStream(cfg.ip, cfg.access_code, cfg.camera_port)
-        self.state = PrinterState(printer_id=cfg.id, name=cfg.name)
+        self.state = PrinterState(printer_id=cfg.id, name=cfg.name, sort=cfg.sort)
         self.thumbnail: bytes | None = None
         self._thumb_fetched_for: str = ""  # gcode_file we fetched thumbnail for
         self._backoff = 3.0
@@ -183,6 +202,7 @@ class PrinterConnection:
             has_thumbnail=self.thumbnail is not None,
             thumbnail_key=self._thumb_fetched_for if self.thumbnail is not None else "",
             filaments=filaments,
+            sort=self.cfg.sort,
             timestamp=time.time(),
         )
 
@@ -490,6 +510,13 @@ class PrinterManager:
         conn = self._connections.pop(printer_id, None)
         if not conn:
             return False
+        try:
+            path = _backup_printer_config(conn.cfg)
+            logger.info("Backed up old printer config to %s", path)
+        except Exception as e:
+            logger.warning(
+                "Failed to back up printer config for %s: %s", conn.cfg.name, e
+            )
         await conn.disconnect()
         self._config.printers = [
             p for p in self._config.printers if p.id != printer_id
@@ -502,6 +529,13 @@ class PrinterManager:
         conn = self._connections.get(printer_id)
         if not conn:
             return False
+        try:
+            path = _backup_printer_config(conn.cfg)
+            logger.info("Backed up old printer config to %s", path)
+        except Exception as e:
+            logger.warning(
+                "Failed to back up printer config for %s: %s", conn.cfg.name, e
+            )
         await conn.disconnect()
         new_conn = PrinterConnection(cfg)
         self._connections[printer_id] = new_conn

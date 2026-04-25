@@ -30,7 +30,9 @@ async def camera_view(request: Request, printer_id: str):
 @router.get("/settings", response_class=HTMLResponse)
 async def settings(request: Request):
     manager = request.app.state.manager
-    printers = manager.config.printers
+    printers = sorted(
+        manager.config.printers, key=lambda p: p.name.lower()
+    )
     return templates.TemplateResponse(
         request, "settings.html", {"printers": printers}
     )

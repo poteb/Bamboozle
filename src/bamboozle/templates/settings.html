@@ -3,71 +3,84 @@
 {% block content %}
 <h2>Printer Settings</h2>
 
-<article>
-    <header><h3 id="form-title">Add Printer</h3></header>
-    <form id="printer-form" onsubmit="return handlePrinterSubmit(event)">
-        <input type="hidden" id="edit-id" value="">
-        <div class="grid">
-            <label>
-                Name
-                <input type="text" id="printer-name" placeholder="e.g. Workshop P1S" required>
-            </label>
-            <label>
-                IP Address
-                <input type="text" id="printer-ip" placeholder="e.g. 192.168.1.50" required>
-            </label>
+<div class="settings-layout">
+    <aside class="printer-sidebar">
+        <button type="button" class="new-btn" onclick="newPrinter()">+ New</button>
+        <div class="printer-filter-wrap">
+            <input type="text" id="printer-filter" class="printer-filter" placeholder="Filter…" oninput="filterPrinters()" autocomplete="off">
+            <button type="button" id="printer-filter-clear" class="printer-filter-clear" onclick="clearPrinterFilter()" hidden aria-label="Clear filter">×</button>
         </div>
-        <div class="grid">
-            <label>
-                Access Code
-                <input type="text" id="printer-code" placeholder="From printer LCD" required>
-            </label>
-            <label>
-                Serial Number
-                <input type="text" id="printer-serial" placeholder="From printer LCD" required>
-            </label>
-        </div>
-        <label>
-            Camera Port
-            <select id="printer-camera-port">
-                <option value="6000">6000 (A1 / P1 / P1S series)</option>
-                <option value="322">322 (X1 / X1C / H2C / H2D / P2 series - requires ffmpeg)</option>
-            </select>
-        </label>
-        <label>
-            <input type="checkbox" id="printer-camera-enabled" role="switch">
-            Enable camera stream
-        </label>
-        <small>Requires "LAN Mode Liveview" on the printer and ffmpeg installed on this PC.</small>
-        <div class="grid" style="margin-top: 1rem;">
-            <button type="button" id="test-btn" class="secondary" onclick="testConnection()">Test Connection</button>
-            <button type="submit" id="save-btn">Add Printer</button>
-        </div>
-        <p id="test-result"></p>
-    </form>
-</article>
+        {% if not printers %}
+        <p class="empty-note">No printers configured yet.</p>
+        {% else %}
+        <ul>
+            {% for p in printers %}
+            <li data-name="{{ p.name }}">
+                <button type="button" class="printer-link" data-id="{{ p.id }}"
+                    onclick="editPrinter('{{ p.id }}', '{{ p.name }}', '{{ p.ip }}', '{{ p.access_code }}', '{{ p.serial }}', {{ p.camera_port }}, {{ 'true' if p.camera_enabled else 'false' }}, {{ p.sort }})">
+                    {{ p.name }}
+                </button>
+            </li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+    </aside>
 
-<h3>Configured Printers</h3>
-{% if not printers %}
-<p>No printers configured yet.</p>
-{% else %}
-<div id="printer-list">
-    {% for p in printers %}
-    <article class="printer-entry" data-id="{{ p.id }}">
-        <div class="grid">
-            <div>
-                <strong>{{ p.name }}</strong><br>
-                <small>{{ p.ip }} &bull; Serial: {{ p.serial }} &bull; Camera: {{ "On" if p.camera_enabled else "Off" }} (port {{ p.camera_port }})</small>
-            </div>
-            <div style="text-align: right;">
-                <button class="outline secondary" onclick="editPrinter('{{ p.id }}', '{{ p.name }}', '{{ p.ip }}', '{{ p.access_code }}', '{{ p.serial }}', {{ p.camera_port }}, {{ 'true' if p.camera_enabled else 'false' }})">Edit</button>
-                <button class="outline" style="--pico-color: var(--pico-color-red-500);" onclick="deletePrinter('{{ p.id }}', '{{ p.name }}')">Delete</button>
-            </div>
-        </div>
+    <article id="form-placeholder" class="form-placeholder">
+        <p>Select a printer or click New to begin.</p>
     </article>
-    {% endfor %}
+
+    <article id="form-pane" hidden>
+        <header><h3 id="form-title">Add Printer</h3></header>
+        <form id="printer-form" class="printer-form" onsubmit="return handlePrinterSubmit(event)">
+            <input type="hidden" id="edit-id" value="">
+            <div class="form-col form-col-left">
+                <label>
+                    Name
+                    <input type="text" id="printer-name" placeholder="e.g. Workshop P1S" required>
+                </label>
+                <label>
+                    Sort
+                    <input type="number" id="printer-sort" name="sort" value="0" step="1">
+                    <small>Lower numbers appear first when sorting by Sort.</small>
+                </label>
+                <label>
+                    Camera Port
+                    <select id="printer-camera-port">
+                        <option value="6000">6000 (A1 / P1 / P1S series)</option>
+                        <option value="322">322 (X1 / X1C / H2C / H2D / P2 series - requires ffmpeg)</option>
+                    </select>
+                </label>
+                <label>
+                    <input type="checkbox" id="printer-camera-enabled" role="switch">
+                    Enable camera stream
+                </label>
+                <small>Requires "LAN Mode Liveview" on the printer and ffmpeg installed on this PC.</small>
+            </div>
+            <fieldset class="form-col form-col-right connection-group">
+                <legend>Connection</legend>
+                <label>
+                    IP Address
+                    <input type="text" id="printer-ip" placeholder="e.g. 192.168.1.50" required>
+                </label>
+                <label>
+                    Access Code
+                    <input type="text" id="printer-code" placeholder="From printer LCD" required>
+                </label>
+                <label>
+                    Serial Number
+                    <input type="text" id="printer-serial" placeholder="From printer LCD" required>
+                </label>
+                <button type="button" id="test-btn" class="secondary" onclick="testConnection()">Test Connection</button>
+                <p id="test-result"></p>
+            </fieldset>
+            <div class="form-submit-row">
+                <button type="button" id="delete-btn" class="outline" style="display: none;" onclick="deleteCurrentPrinter()">Delete</button>
+                <button type="submit" id="save-btn">Add Printer</button>
+            </div>
+        </form>
+    </article>
 </div>
-{% endif %}
 
 <script>
 async function handlePrinterSubmit(e) {
@@ -80,6 +93,7 @@ async function handlePrinterSubmit(e) {
         serial: document.getElementById('printer-serial').value,
         camera_port: parseInt(document.getElementById('printer-camera-port').value),
         camera_enabled: document.getElementById('printer-camera-enabled').checked,
+        sort: parseInt(document.getElementById('printer-sort').value) || 0,
     };
 
     const url = editId ? `/api/printers/${editId}` : '/api/printers';
@@ -102,7 +116,65 @@ async function handlePrinterSubmit(e) {
     }
 }
 
-function editPrinter(id, name, ip, code, serial, cameraPort, cameraEnabled) {
+function filterPrinters() {
+    const input = document.getElementById('printer-filter');
+    const value = input ? input.value : '';
+    const query = value.trim().toLowerCase();
+    document.querySelectorAll('.printer-sidebar li').forEach(li => {
+        const name = (li.dataset.name || '').toLowerCase();
+        li.style.display = (!query || name.includes(query)) ? '' : 'none';
+    });
+    const clearBtn = document.getElementById('printer-filter-clear');
+    if (clearBtn) clearBtn.hidden = value.length === 0;
+}
+
+function clearPrinterFilter() {
+    const input = document.getElementById('printer-filter');
+    if (!input) return;
+    input.value = '';
+    filterPrinters();
+    input.focus();
+}
+
+function setSelectedSidebarItem(id) {
+    document.querySelectorAll('.printer-sidebar .printer-link').forEach(el => {
+        if (id && el.dataset.id === id) {
+            el.classList.add('selected');
+        } else {
+            el.classList.remove('selected');
+        }
+    });
+}
+
+function showForm() {
+    const placeholder = document.getElementById('form-placeholder');
+    const pane = document.getElementById('form-pane');
+    if (placeholder) placeholder.hidden = true;
+    if (pane) pane.hidden = false;
+}
+
+function newPrinter() {
+    document.getElementById('edit-id').value = '';
+    document.getElementById('printer-name').value = '';
+    document.getElementById('printer-ip').value = '';
+    document.getElementById('printer-code').value = '';
+    document.getElementById('printer-serial').value = '';
+    document.getElementById('printer-camera-port').value = '6000';
+    document.getElementById('printer-camera-enabled').checked = false;
+    document.getElementById('printer-sort').value = 0;
+    document.getElementById('form-title').textContent = 'Add Printer';
+    document.getElementById('save-btn').textContent = 'Add Printer';
+    document.getElementById('delete-btn').style.display = 'none';
+    const result = document.getElementById('test-result');
+    if (result) {
+        result.textContent = '';
+        result.style.color = '';
+    }
+    setSelectedSidebarItem(null);
+    showForm();
+}
+
+function editPrinter(id, name, ip, code, serial, cameraPort, cameraEnabled, sort) {
     document.getElementById('edit-id').value = id;
     document.getElementById('printer-name').value = name;
     document.getElementById('printer-ip').value = ip;
@@ -110,9 +182,19 @@ function editPrinter(id, name, ip, code, serial, cameraPort, cameraEnabled) {
     document.getElementById('printer-serial').value = serial;
     document.getElementById('printer-camera-port').value = cameraPort;
     document.getElementById('printer-camera-enabled').checked = cameraEnabled;
+    document.getElementById('printer-sort').value = sort ?? 0;
     document.getElementById('form-title').textContent = 'Edit Printer';
     document.getElementById('save-btn').textContent = 'Update Printer';
-    window.scrollTo({top: 0, behavior: 'smooth'});
+    document.getElementById('delete-btn').style.display = '';
+    setSelectedSidebarItem(id);
+    showForm();
+}
+
+function deleteCurrentPrinter() {
+    const id = document.getElementById('edit-id').value;
+    if (!id) return;
+    const name = document.getElementById('printer-name').value || 'this printer';
+    deletePrinter(id, name);
 }
 
 async function deletePrinter(id, name) {

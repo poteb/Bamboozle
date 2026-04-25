@@ -37,6 +37,7 @@ async def add_printer(request: Request, body: PrinterAddRequest) -> dict:
         serial=body.serial,
         camera_port=body.camera_port,
         camera_enabled=body.camera_enabled,
+        sort=body.sort,
     )
     await manager.add_printer(cfg)
     return {"id": cfg.id, "name": cfg.name}
@@ -64,6 +65,7 @@ async def update_printer(
         serial=body.serial or existing.serial,
         camera_port=body.camera_port if body.camera_port is not None else existing.camera_port,
         camera_enabled=body.camera_enabled if body.camera_enabled is not None else existing.camera_enabled,
+        sort=body.sort if body.sort is not None else existing.sort,
     )
     success = await manager.update_printer(printer_id, updated)
     if not success:

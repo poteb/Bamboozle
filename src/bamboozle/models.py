@@ -14,6 +14,7 @@ class PrinterConfig(BaseModel):
     serial: str
     camera_port: int = 6000  # 6000 for A1/P1/P1S, 322 for X1/H2C/H2D/P2
     camera_enabled: bool = False
+    sort: int = 0
 
 
 class AppConfig(BaseModel):
@@ -56,6 +57,7 @@ class PrinterState(BaseModel):
     thumbnail_key: str = ""
     filaments: list[Filament] = []
     error_code: int = 0
+    sort: int = 0
     timestamp: float = Field(default_factory=time.time)
 
 
@@ -66,6 +68,7 @@ class PrinterAddRequest(BaseModel):
     serial: str
     camera_port: int = 322
     camera_enabled: bool = False
+    sort: int = 0
 
 
 class PrinterUpdateRequest(BaseModel):
@@ -75,3 +78,4 @@ class PrinterUpdateRequest(BaseModel):
     serial: str | None = None
     camera_port: int | None = None
     camera_enabled: bool | None = None
+    sort: int | None = None

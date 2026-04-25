@@ -172,6 +172,10 @@ class BamboozleApp {
         entries.sort(([, a], [, b]) => {
             let cmp = 0;
             switch (this.sortBy) {
+                case 'sort':
+                    cmp = (a.sort ?? 0) - (b.sort ?? 0);
+                    if (cmp === 0) cmp = a.name.localeCompare(b.name);
+                    break;
                 case 'name':
                     cmp = a.name.localeCompare(b.name);
                     break;
