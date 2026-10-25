@@ -137,7 +137,49 @@ class BamboozleApp {
         this._initSortControls();
         this._updateAllCamsToggle();
 
-        if (this.grid) this.connect();
+        // Set once any WS init/update has been applied; the HTTP initial load
+        // must not overwrite newer WS data after that.
+        this._wsApplied = false;
+        // The reconnecting marker stays hidden for the first second after
+        // load so a normal (fast) WS connect doesn't flash it.
+        this._wsMarkerArmed = false;
+
+        if (this.grid) {
+            this.loadInitial();
+            this.connect();
+            setTimeout(() => {
+                this._wsMarkerArmed = true;
+                this._updateWsMarker();
+            }, 1000);
+        }
+    }
+
+    // Plain HTTP isn't subject to the browser's WebSocket reconnect throttling
+    // (Firefox can delay a new WS by up to ~60s), so render from it first.
+    async loadInitial() {
+        try {
+            const res = await fetch('/api/printers');
+            if (!res.ok) return;
+            const data = await res.json();
+            this.applyInitialPrinters(data.printers);
+        } catch {
+            // Stay silent; the WS init will fill the dashboard.
+        }
+    }
+
+    applyInitialPrinters(list) {
+        if (this._wsApplied || !Array.isArray(list)) return;
+        for (const state of list) {
+            if (state && state.printer_id) this.printers[state.printer_id] = state;
+        }
+        this.render();
+    }
+
+    _updateWsMarker() {
+        const marker = document.getElementById('ws-status');
+        if (!marker) return;
+        const open = this.ws && this.ws.readyState === WebSocket.OPEN;
+        marker.hidden = !this._wsMarkerArmed || open;
     }
 
     _initSortControls() {
@@ -208,13 +250,18 @@ class BamboozleApp {
     connect() {
         const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
         this.ws = new WebSocket(`${proto}//${location.host}/ws`);
+        this.ws.onopen = () => this._updateWsMarker();
         this.ws.onmessage = (e) => this.onMessage(JSON.parse(e.data));
-        this.ws.onclose = () => setTimeout(() => this.connect(), 2000);
+        this.ws.onclose = () => {
+            this._updateWsMarker();
+            setTimeout(() => this.connect(), 2000);
+        };
         this.ws.onerror = () => {};
     }
 
     onMessage(msg) {
         if (msg.type === 'init' || msg.type === 'update') {
+            this._wsApplied = true;
             for (const [id, state] of Object.entries(msg.printers)) {
                 this.printers[id] = state;
             }

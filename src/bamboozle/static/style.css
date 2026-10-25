@@ -71,6 +71,33 @@
     font-size: 0.85rem;
 }
 
+/* WebSocket reconnecting marker (right end of the toolbar) */
+.ws-status {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    color: var(--pico-muted-color);
+}
+
+.ws-status[hidden] {
+    display: none;
+}
+
+.ws-status::before {
+    content: "";
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: var(--status-paused);
+    animation: ws-status-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes ws-status-pulse {
+    50% { opacity: 0.3; }
+}
+
 /* Printer Grid */
 .printer-grid {
     display: grid;

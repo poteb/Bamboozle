@@ -19,6 +19,8 @@ py -m bamboozle.main           # or: python -m bamboozle.main
 
 Tests: `pip install -r src/requirements-dev.txt`, then run `python -m pytest` from `src/` (`src/pytest.ini` sets `pythonpath = .`). `tests/conftest.py` points `LOCALAPPDATA` at a temp dir so tests never touch the real config. Network adapters (`discovery.tcp_reachable`, `discovery.fetch_cert_common_name`) are monkeypatched in tests; `PrinterManager(..., discovery_port=None)` disables the UDP listener.
 
+JS tests: `node --test "src/tests/js/*.test.mjs"` from the repo root (Node 22+, no npm deps). They load `static/app.js` into a `node:vm` context with stubbed `document` / `fetch` / `WebSocket` / `setTimeout` and stub out `render()`, so they cover state logic, not card DOM.
+
 Working directory matters: `main.py` mounts static files with the relative path `bamboozle/static`, so the server must be launched from `src/`.
 
 On startup `main.py` spawns a thread that opens `http://127.0.0.1:<port>` in the default browser after a 2-second delay.
@@ -68,7 +70,7 @@ Before `mqtt_start`, `PrinterConnection.connect` (and `POST /api/printers/test`)
 - `ws.py` — WebSocket endpoint the dashboard subscribes to for push updates.
 - `stream.py` — MJPEG camera passthrough.
 
-**Frontend** is plain HTML/JS/CSS in `bamboozle/templates/` and `bamboozle/static/` (no build step). The dashboard opens a WebSocket and re-renders on each `update` message.
+**Frontend** is plain HTML/JS/CSS in `bamboozle/templates/` and `bamboozle/static/` (no build step). On load the dashboard fetches `GET /api/printers` over HTTP and renders right away (browsers can throttle WS reconnects, Firefox by up to ~60s), then opens a WebSocket and re-renders on each `init`/`update`. Once any WS state has been applied, a late HTTP response is ignored. `#ws-status` ("Reconnecting…") shows while the WS isn't open, after a 1s grace period from page load.
 
 ## Task workflow (Docket)
 
