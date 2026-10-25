@@ -11,7 +11,7 @@ from typing import Any
 import bambulabs_api as bl
 from fastapi import WebSocket
 
-from . import discovery
+from . import discovery, protocol
 from .camera import CameraStream
 from .config import _config_dir, save_config
 from .models import AppConfig, Filament, PrinterConfig, PrinterState
@@ -58,6 +58,31 @@ class PrinterConnection:
         self._connected = False
         self._last_seen_up = 0.0  # monotonic time MQTT was last seen connected
         self._connecting = False
+        # Set from paho's thread on every CONNACK; kept across reconnects
+        # until a login is accepted (or the printer stops answering at all).
+        self._auth_rejected = False
+        # Whether the current connect attempt's login was accepted or refused
+        # yet, so a retry doesn't act on the previous attempt's refusal.
+        self._login_answered = False
+        self.printer.mqtt_client.on_connect_handler = self._on_mqtt_connack
+
+    def _on_mqtt_connack(self, _mqtt, _client, _userdata, _flags, rc, _props) -> None:
+        # _login_answered is set last, so _login_refused() never pairs a new
+        # answer with the previous attempt's flag.
+        if protocol.is_auth_refusal(rc):
+            if not self._auth_rejected:
+                logger.warning(
+                    "%s: MQTT login refused at %s (%s): access code wrong or changed",
+                    self.cfg.name, self.cfg.ip, rc,
+                )
+            self._auth_rejected = True
+            self._login_answered = True
+        elif not protocol.connack_failed(rc):
+            if self._auth_rejected:
+                logger.info("%s: MQTT login accepted again", self.cfg.name)
+            self._auth_rejected = False
+            self._login_answered = True
+        # Other refusals (e.g. server unavailable) say nothing about the code.
 
     @property
     def connecting(self) -> bool:
@@ -76,14 +101,25 @@ class PrinterConnection:
         )
         if not reachable:
             logger.warning("%s: printer unreachable at %s", self.cfg.name, self.cfg.ip)
+            self._auth_rejected = False  # says nothing about the code any more
             self._schedule_retry()
             return False
+        self._login_answered = False
         try:
             await asyncio.wait_for(
                 asyncio.to_thread(self.printer.mqtt_start), timeout=10
             )
             await asyncio.sleep(self.MQTT_SETTLE_SECONDS)
             self._connected = True
+            if self._login_refused():
+                # paho would keep retrying the bad code every few seconds;
+                # stop it and retry on our own (backed-off) schedule instead.
+                logger.error(
+                    "%s: connection refused at %s: access code wrong or changed",
+                    self.cfg.name, self.cfg.ip,
+                )
+                await self.reset_session()
+                return False
             self._last_seen_up = time.monotonic()  # grace starts now
             logger.info("Connected to printer %s (%s)", self.cfg.name, self.cfg.ip)
             return True
@@ -126,8 +162,8 @@ class PrinterConnection:
         """
         if self._connecting:
             return False
-        if not self._connected:
-            return True
+        if not self._connected or self._login_refused():
+            return True  # a refused code won't fix itself; don't wait out the grace
         try:
             if self.printer.mqtt_client.is_connected():
                 self._last_seen_up = time.monotonic()
@@ -136,6 +172,10 @@ class PrinterConnection:
         except Exception:
             pass
         return time.monotonic() - self._last_seen_up > self.MQTT_GRACE_SECONDS
+
+    def _login_refused(self) -> bool:
+        """The current attempt's login was refused (not just a previous one)."""
+        return self._login_answered and self._auth_rejected
 
     async def reset_session(self) -> None:
         """Stop a dead MQTT session so the next reconnect re-probes the IP."""
@@ -146,10 +186,12 @@ class PrinterConnection:
         self._schedule_retry()
 
     async def read_state(self) -> PrinterState:
-        if not self._connected:
-            # Never started MQTT (e.g. unreachable) - don't poke the library
-            # getters, they'd only log "Printer Values Not Available Yet".
+        if not self._connected or self._auth_rejected:
+            # Never started MQTT (e.g. unreachable) or the login was refused -
+            # don't poke the library getters, they'd only log "Printer Values
+            # Not Available Yet".
             self.state.online = False
+            self.state.last_error = protocol.AUTH_REJECTED if self._auth_rejected else ""
             self.state.timestamp = time.time()
             return self.state
         try:
@@ -234,6 +276,10 @@ class PrinterConnection:
 
         filaments = self._read_filaments()
 
+        report = self._print_payload() or {}
+        developer_mode = protocol.developer_mode(report)
+        commands_blocked = protocol.commands_blocked(report)
+
         online = gcode_str != "UNKNOWN" or nozzle_temp is not None
 
         # Fetch thumbnail when a new print job is detected
@@ -276,9 +322,21 @@ class PrinterConnection:
             has_thumbnail=self.thumbnail is not None,
             thumbnail_key=self._thumb_fetched_for if self.thumbnail is not None else "",
             filaments=filaments,
+            developer_mode=developer_mode,
+            commands_blocked=commands_blocked,
             sort=self.cfg.sort,
             timestamp=time.time(),
         )
+
+    def _print_payload(self) -> dict | None:
+        """The raw `print` object of the latest reports, or None before any."""
+        try:
+            dump = self.printer.mqtt_dump() or {}
+        except Exception as e:
+            logger.debug("mqtt_dump() failed for %s: %s", self.cfg.name, e)
+            return None
+        payload = dump.get("print") if isinstance(dump, dict) else None
+        return payload if isinstance(payload, dict) else None
 
     # --- Filament helpers -------------------------------------------------
 
@@ -369,14 +427,8 @@ class PrinterConnection:
         only return a non-None list when we actually find something useful;
         otherwise we let the caller fall back to the library helpers.
         """
-        try:
-            dump = self.printer.mqtt_dump() or {}
-        except Exception as e:
-            logger.debug("mqtt_dump() failed for %s: %s", self.cfg.name, e)
-            return None
-
-        print_payload = dump.get("print") if isinstance(dump, dict) else None
-        if not isinstance(print_payload, dict):
+        print_payload = self._print_payload()
+        if print_payload is None:
             return None
 
         out: list[Filament] = []
@@ -845,12 +897,16 @@ class PrinterManager:
             return False, "Printer not connected"
 
         try:
-            result = await asyncio.to_thread(
+            ok, msg = await asyncio.to_thread(
                 self._run_command, conn.printer, action, params or {}
             )
-            return result
         except Exception as e:
             return False, str(e)
+        if ok and conn.state.commands_blocked:
+            # Published, but the printer will drop it. Still sent, so a wrong
+            # detection can never stop commands from working.
+            return False, protocol.COMMANDS_BLOCKED_MESSAGE
+        return ok, msg
 
     @staticmethod
     def _run_command(

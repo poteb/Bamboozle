@@ -276,6 +276,18 @@
     padding: 1rem;
 }
 
+/* Card notice: why commands or the connection don't work. Like .ws-status,
+   it stays rendered while empty (no space taken) so its role="status" live
+   region announces the text when it appears. */
+.card-notice:not(:empty) {
+    margin-top: 0.5rem;
+    padding: 0.35rem 0.6rem;
+    border-left: 3px solid var(--status-paused);
+    border-radius: 4px;
+    background: rgba(255, 152, 0, 0.12);
+    font-size: 0.85rem;
+}
+
 /* File name */
 .file-name {
     font-size: 0.9rem;
