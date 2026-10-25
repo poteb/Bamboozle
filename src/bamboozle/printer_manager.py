@@ -39,6 +39,12 @@ def _backup_printer_config(cfg: PrinterConfig) -> Path:
 class PrinterConnection:
     """Wraps a single printer's MQTT connection, camera stream, and state."""
 
+    INITIAL_BACKOFF_SECONDS = 3.0
+    MAX_BACKOFF_SECONDS = 60.0
+    MQTT_SETTLE_SECONDS = 2.0  # give MQTT a moment to establish after start
+    # How long a started session may stay not-connected before it counts as down.
+    MQTT_GRACE_SECONDS = 20.0
+
     def __init__(self, cfg: PrinterConfig):
         self.cfg = cfg
         self.cfg.camera_enabled = False  # Always start with cameras off
@@ -47,36 +53,62 @@ class PrinterConnection:
         self.state = PrinterState(printer_id=cfg.id, name=cfg.name, sort=cfg.sort)
         self.thumbnail: bytes | None = None
         self._thumb_fetched_for: str = ""  # gcode_file we fetched thumbnail for
-        self._backoff = 3.0
+        self._backoff = self.INITIAL_BACKOFF_SECONDS
+        self._retry_at = 0.0  # monotonic time the next reconnect is due
         self._connected = False
+        self._connected_at = 0.0
         self._connecting = False
 
+    @property
+    def connecting(self) -> bool:
+        return self._connecting
+
     async def connect(self) -> bool:
+        self._connecting = True
+        try:
+            return await self._connect()
+        finally:
+            self._connecting = False
+
+    async def _connect(self) -> bool:
         reachable = await asyncio.to_thread(
             discovery.tcp_reachable, self.cfg.ip, discovery.MQTT_PORT
         )
         if not reachable:
             logger.warning("%s: printer unreachable at %s", self.cfg.name, self.cfg.ip)
-            self._connected = False
+            self._schedule_retry()
             return False
         try:
             await asyncio.wait_for(
                 asyncio.to_thread(self.printer.mqtt_start), timeout=10
             )
-            # Give MQTT a moment to establish
-            await asyncio.sleep(2)
+            await asyncio.sleep(self.MQTT_SETTLE_SECONDS)
             self._connected = True
-            self._backoff = 3.0
+            self._connected_at = time.monotonic()
+            self._backoff = self.INITIAL_BACKOFF_SECONDS
             logger.info("Connected to printer %s (%s)", self.cfg.name, self.cfg.ip)
             return True
         except asyncio.TimeoutError:
             logger.error("Timeout connecting to %s (%s)", self.cfg.name, self.cfg.ip)
-            self._connected = False
+            self._schedule_retry()
             return False
         except Exception as e:
             logger.error("Failed to connect to %s: %s", self.cfg.name, e)
-            self._connected = False
+            self._schedule_retry()
             return False
+
+    def _schedule_retry(self) -> None:
+        self._connected = False
+        self._retry_at = time.monotonic() + self._backoff
+        self._backoff = min(self._backoff * 2, self.MAX_BACKOFF_SECONDS)
+
+    def needs_reconnect(self) -> bool:
+        """True when not connected, not mid-connect, and the backoff has elapsed."""
+        return (
+            not self._connected
+            and not self._connecting
+            and time.monotonic() >= self._retry_at
+        )
 
     async def disconnect(self) -> None:
         try:
@@ -86,12 +118,30 @@ class PrinterConnection:
             logger.debug("Error disconnecting %s: %s", self.cfg.name, e)
         self._connected = False
 
-    def is_healthy(self) -> bool:
-        """True while the MQTT session to the saved IP is up."""
-        try:
-            return self._connected and self.printer.mqtt_client.is_connected()
-        except Exception:
+    def is_offline(self) -> bool:
+        """True when the printer is known to be down at its saved IP.
+
+        A connect in progress, or a freshly started session still within its
+        grace period, does not count as offline yet.
+        """
+        if self._connecting:
             return False
+        if not self._connected:
+            return True
+        try:
+            if self.printer.mqtt_client.is_connected():
+                return False
+        except Exception:
+            pass
+        return time.monotonic() - self._connected_at > self.MQTT_GRACE_SECONDS
+
+    async def reset_session(self) -> None:
+        """Stop a dead MQTT session so the next reconnect re-probes the IP."""
+        try:
+            await asyncio.to_thread(self.printer.mqtt_stop)
+        except Exception as e:
+            logger.debug("Error stopping MQTT for %s: %s", self.cfg.name, e)
+        self._connected = False
 
     async def read_state(self) -> PrinterState:
         if not self._connected:
@@ -528,8 +578,10 @@ class PrinterManager:
         if self._listener:
             self._listener.stop()
             self._listener = None
-        for task in list(self._tasks):
+        tasks = list(self._tasks)
+        for task in tasks:
             task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         if self._poll_task:
             self._poll_task.cancel()
             try:
@@ -591,13 +643,9 @@ class PrinterManager:
 
     async def _connect_printer(self, printer_id: str) -> None:
         conn = self._connections.get(printer_id)
-        if not conn or conn._connecting:
+        if not conn or conn.connecting:
             return
-        conn._connecting = True
-        try:
-            ok = await conn.connect()
-        finally:
-            conn._connecting = False
+        ok = await conn.connect()
         if self._connections.get(printer_id) is not conn:
             # Replaced (edited / relocated) while we were connecting.
             await conn.disconnect()
@@ -628,7 +676,7 @@ class PrinterManager:
             (c for c in self._connections.values() if c.cfg.serial.upper() == serial),
             None,
         )
-        if conn is None or conn.cfg.ip == ann.ip or conn.is_healthy():
+        if conn is None or conn.cfg.ip == ann.ip or not conn.is_offline():
             return
         printer_id = conn.cfg.id
         key = (serial, ann.ip)
@@ -651,7 +699,7 @@ class PrinterManager:
                 return
             # Re-check: the connection may have recovered or been edited meanwhile.
             current = self._connections.get(printer_id)
-            if current is not conn or conn.is_healthy():
+            if current is not conn or not conn.is_offline():
                 return
             old_ip = conn.cfg.ip
             new_cfg = conn.cfg.model_copy(update={"ip": ann.ip})
@@ -687,9 +735,17 @@ class PrinterManager:
                 await asyncio.sleep(self._config.poll_interval)
                 states: dict[str, Any] = {}
                 for pid, conn in list(self._connections.items()):
-                    # Auto-reconnect disconnected printers in the background so
-                    # an unreachable one can't stall updates for the rest.
-                    if not conn._connected and not conn._connecting:
+                    # A session that went down (e.g. the printer's IP changed)
+                    # is reset so the reconnect re-probes the saved IP.
+                    if conn._connected and conn.is_offline():
+                        logger.warning(
+                            "%s: MQTT session to %s is down, reconnecting",
+                            conn.cfg.name, conn.cfg.ip,
+                        )
+                        await conn.reset_session()
+                    # Reconnect in the background so an unreachable printer
+                    # can't stall updates for the rest.
+                    if conn.needs_reconnect():
                         logger.info("Attempting reconnect for %s", conn.cfg.name)
                         self._spawn(self._connect_printer(pid))
 

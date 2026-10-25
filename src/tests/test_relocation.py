@@ -8,18 +8,11 @@ from bamboozle import discovery
 from bamboozle.discovery import Announcement
 from bamboozle.models import AppConfig, PrinterConfig
 from bamboozle.printer_manager import PrinterConnection, PrinterManager
+from fakes import FakeWs
 
 SERIAL = "01P00C511100150"
 OLD_IP = "192.168.0.51"
 NEW_IP = "192.168.0.103"
-
-
-class FakeWs:
-    def __init__(self):
-        self.sent = []
-
-    async def send_json(self, msg):
-        self.sent.append(msg)
 
 
 @pytest.fixture
@@ -85,7 +78,7 @@ def _run_announcement(ann, healthy=False, monkeypatch=None, repeat=1):
         return mgr, ws, ip
 
     if healthy:
-        monkeypatch.setattr(PrinterConnection, "is_healthy", lambda self: True)
+        monkeypatch.setattr(PrinterConnection, "is_offline", lambda self: False)
     return asyncio.run(scenario())
 
 
@@ -131,4 +124,32 @@ def test_unknown_serial_is_ignored(network, isolated_appdata):
     network["cert_cn"][NEW_IP] = "03919D533005771"
     mgr, ws, ip = _run_announcement(Announcement(ip=NEW_IP, serial="03919D533005771"))
     _assert_unchanged(mgr, ws, ip, isolated_appdata)
+    assert network["cert_probes"] == []
+
+
+def test_printer_still_connecting_is_not_switched(network, isolated_appdata, monkeypatch):
+    """A dual-interface printer may announce its other IP while we connect to the saved one."""
+    import threading
+    import time as _time
+
+    network["cert_cn"][NEW_IP] = SERIAL
+    release = threading.Event()
+
+    def slow_reachable(ip, port=8883, timeout=3.0):
+        release.wait(2)
+        return False
+
+    monkeypatch.setattr(discovery, "tcp_reachable", slow_reachable)
+
+    async def scenario():
+        mgr = _manager()
+        await mgr.start()
+        await asyncio.sleep(0.05)  # initial connect to OLD_IP still in progress
+        await mgr.handle_announcement(Announcement(ip=NEW_IP, serial=SERIAL))
+        ip = mgr.get_connection("p1s").cfg.ip
+        release.set()
+        await mgr.stop()
+        return ip
+
+    assert asyncio.run(scenario()) == OLD_IP
     assert network["cert_probes"] == []

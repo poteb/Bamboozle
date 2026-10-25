@@ -6,6 +6,7 @@ from bamboozle import discovery
 from bamboozle.models import PrinterAddRequest, PrinterConfig
 from bamboozle.printer_manager import PrinterConnection
 from bamboozle.routers.api import test_connection as api_test_connection
+from fakes import FakeWs
 
 IP = "192.168.0.51"
 
@@ -57,13 +58,6 @@ def test_unreachable_printer_does_not_stall_dashboard_updates(monkeypatch):
 
     monkeypatch.setattr(discovery, "tcp_reachable", slow_unreachable)
 
-    class FakeWs:
-        def __init__(self):
-            self.sent = []
-
-        async def send_json(self, msg):
-            self.sent.append(msg)
-
     async def scenario():
         cfg = PrinterConfig(name="P1S", ip=IP, access_code="x", serial="01P00C511100150")
         mgr = PrinterManager(AppConfig(printers=[cfg], poll_interval=0.05), discovery_port=None)
@@ -76,3 +70,52 @@ def test_unreachable_printer_does_not_stall_dashboard_updates(monkeypatch):
         return updates
 
     assert asyncio.run(scenario()) >= 3
+
+
+def test_unreachable_printer_is_retried_with_backoff(monkeypatch):
+    from bamboozle.models import AppConfig
+    from bamboozle.printer_manager import PrinterManager
+
+    probes = []
+    monkeypatch.setattr(
+        discovery, "tcp_reachable", lambda ip, port=8883, timeout=3.0: probes.append(ip) or False)
+
+    async def scenario():
+        cfg = PrinterConfig(name="P1S", ip=IP, access_code="x", serial="01P00C511100150")
+        mgr = PrinterManager(AppConfig(printers=[cfg], poll_interval=0.02), discovery_port=None)
+        await mgr.start()
+        await asyncio.sleep(0.5)
+        await mgr.stop()
+
+    asyncio.run(scenario())
+    assert len(probes) == 1  # first retry is due after 3s, not every poll
+
+
+def test_session_lost_mid_run_is_reported_unreachable_on_reconnect(monkeypatch, caplog):
+    """IP changed while running: MQTT drops, the reconnect hits the TCP pre-check."""
+    import bambulabs_api as bl
+
+    from bamboozle.models import AppConfig
+    from bamboozle.printer_manager import PrinterManager
+
+    reachable = {"value": True}
+    monkeypatch.setattr(
+        discovery, "tcp_reachable", lambda ip, port=8883, timeout=3.0: reachable["value"])
+    # MQTT "starts" but the session never comes up (the printer has moved away).
+    monkeypatch.setattr(bl.Printer, "mqtt_start", lambda self: None)
+    monkeypatch.setattr(PrinterConnection, "MQTT_GRACE_SECONDS", 0.1)
+    monkeypatch.setattr(PrinterConnection, "MQTT_SETTLE_SECONDS", 0)
+    monkeypatch.setattr(PrinterConnection, "INITIAL_BACKOFF_SECONDS", 0.01)
+
+    async def scenario():
+        cfg = PrinterConfig(name="P1S", ip=IP, access_code="x", serial="01P00C511100150")
+        mgr = PrinterManager(AppConfig(printers=[cfg], poll_interval=0.02), discovery_port=None)
+        await mgr.start()
+        await asyncio.sleep(0.05)
+        reachable["value"] = False
+        await asyncio.sleep(0.4)
+        await mgr.stop()
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(scenario())
+    assert f"printer unreachable at {IP}" in caplog.text
