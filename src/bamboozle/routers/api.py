@@ -77,12 +77,15 @@ async def update_printer(
     if not existing:
         raise HTTPException(404, "Printer not found")
 
+    serial = body.serial or existing.serial
     updated = PrinterConfig(
         id=printer_id,
         name=body.name or existing.name,
         ip=body.ip or existing.ip,
         access_code=body.access_code or existing.access_code,
-        serial=body.serial or existing.serial,
+        serial=serial,
+        # Another serial is another printer; the manager re-learns its model.
+        model=existing.model if serial.upper() == existing.serial.upper() else "",
         camera_port=body.camera_port if body.camera_port is not None else existing.camera_port,
         camera_enabled=body.camera_enabled if body.camera_enabled is not None else existing.camera_enabled,
         sort=body.sort if body.sort is not None else existing.sort,

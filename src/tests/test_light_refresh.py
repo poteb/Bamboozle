@@ -83,23 +83,33 @@ def test_nothing_is_queued_while_the_session_is_down(action):
     assert _published(printer) == []
 
 
-def _manager_with_blocked_printer():
+def _manager_with_dev_mode_off_printer():
     conn = PrinterConnection(
         PrinterConfig(id="h2c", name="H2C", ip="192.168.0.102", access_code="x", serial=SERIAL))
     conn.printer.mqtt_client._client = RecordingPaho()
     conn._connected = True
-    conn.state.commands_blocked = True
+    conn.state.developer_mode = False
     mgr = PrinterManager(AppConfig(), discovery_port=None)
     mgr._connections[conn.cfg.id] = conn
     return mgr, conn
 
 
-def test_refresh_works_on_a_printer_refusing_control_commands():
-    """pushall is a query, which still works without Developer Mode."""
-    mgr, conn = _manager_with_blocked_printer()
+def test_refresh_works_on_a_printer_with_developer_mode_off():
+    """pushall is a query, which works without Developer Mode."""
+    mgr, conn = _manager_with_dev_mode_off_printer()
     ok, msg = asyncio.run(mgr.execute_command("h2c", "refresh"))
     assert ok is True
     assert "Developer Mode" not in msg
+
+
+@pytest.mark.parametrize("action", ["light_on", "light_off"])
+def test_light_reports_success_on_a_printer_with_developer_mode_off(action):
+    """The user's H2C and P2S toggle the light fine with Developer Mode off."""
+    mgr, conn = _manager_with_dev_mode_off_printer()
+    ok, msg = asyncio.run(mgr.execute_command("h2c", action))
+    assert ok is True
+    assert "Developer Mode" not in msg
+    assert len(_published(conn.printer)) == 2
 
 
 def test_refresh_endpoint():

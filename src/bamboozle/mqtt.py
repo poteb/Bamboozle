@@ -39,6 +39,13 @@ def pushall_request() -> dict:
     return {"pushing": {"command": "pushall", "sequence_id": _next_sequence_id()}}
 
 
+def version_request() -> dict:
+    """Ask for module versions (the firmware is module "ota"); answered with
+    an `info` report. The library's connect-time get_version shares a message
+    with pushall, which the printers ignore."""
+    return {"info": {"command": "get_version", "sequence_id": _next_sequence_id()}}
+
+
 def light_requests(mode: str) -> list[dict]:
     """`ledctrl` for both chamber LED nodes (H2 models have two; others ignore
     the second)."""

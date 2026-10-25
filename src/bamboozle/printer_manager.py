@@ -13,7 +13,7 @@ from typing import Any, NamedTuple
 import bambulabs_api as bl
 from fastapi import WebSocket
 
-from . import discovery, mqtt, protocol, thumbnail
+from . import discovery, hms, mqtt, protocol, report, thumbnail
 from .camera import CameraStream
 from .config import _config_dir, save_config
 from .models import AppConfig, Filament, PrinterConfig, PrinterState
@@ -92,13 +92,17 @@ class PrinterConnection:
     # printer is not looked up again.
     THUMB_RETRY_SECONDS = 60.0
     THUMB_MAX_RETRY_SECONDS = 900.0
+    # Until the firmware version is known, ask for it; the wait doubles per
+    # unanswered request, up to the max.
+    VERSION_RETRY_SECONDS = 60.0
+    VERSION_MAX_RETRY_SECONDS = 900.0
     _JOB_ACTIVE = frozenset({"PREPARE", "RUNNING"})
     _JOB_ENDED = frozenset({"FINISH", "FAILED", "IDLE"})
 
     def __init__(self, cfg: PrinterConfig):
         self.cfg = cfg
         self.cfg.camera_enabled = False  # Always start with cameras off
-        self.camera = CameraStream(cfg.ip, cfg.access_code, cfg.camera_port)
+        self.camera = CameraStream(cfg.ip, cfg.access_code, cfg.camera_port, cfg.model)
         # Camera toggles run start()/stop() in worker threads; this keeps
         # them in arrival order.
         self.camera_toggle_lock = asyncio.Lock()
@@ -132,6 +136,8 @@ class PrinterConnection:
         # Why the last session was dropped for silence (protocol.NO_REPORTS /
         # STALE); kept until a report arrives or the printer stops answering.
         self._down_reason = ""
+        self._version_asked_at = -math.inf  # monotonic; get_version last sent
+        self._version_wait = self.VERSION_RETRY_SECONDS
         self.printer = self._new_printer()
 
     def _new_printer(self) -> bl.Printer:
@@ -310,6 +316,9 @@ class PrinterConnection:
         self._schedule_retry()
         # Building a client loads the system CA store; keep it off the loop.
         self.printer = await asyncio.to_thread(self._new_printer)
+        # A new client has an empty dump: ask the new session right away.
+        self._version_asked_at = -math.inf
+        self._version_wait = self.VERSION_RETRY_SECONDS
 
     async def read_state(self) -> PrinterState:
         if not self._connected or self._auth_rejected:
@@ -325,6 +334,8 @@ class PrinterConnection:
         try:
             state_data, job = await asyncio.to_thread(self._read_sync)
             state_data.last_error = self._down_reason  # until the first report
+            if state_data.online and not state_data.firmware:
+                await self._ask_version()
             self._update_thumbnail(job)
             state_data.has_thumbnail = self.thumbnail is not None
             state_data.thumbnail_key = self._thumb_key  # set and cleared with it
@@ -348,12 +359,6 @@ class PrinterConnection:
             gcode_str = "UNKNOWN"
 
         try:
-            print_status = p.get_current_state()
-            status_str = print_status.name if print_status else "UNKNOWN"
-        except Exception:
-            status_str = "UNKNOWN"
-
-        try:
             progress = p.get_percentage() or 0
         except Exception:
             progress = 0
@@ -367,16 +372,6 @@ class PrinterConnection:
                 remaining_min = 0
         except Exception:
             remaining_min = 0
-
-        try:
-            nozzle_temp = p.get_nozzle_temperature()
-        except Exception:
-            nozzle_temp = None
-
-        try:
-            bed_temp = p.get_bed_temperature()
-        except Exception:
-            bed_temp = None
 
         try:
             current_layer = p.current_layer_num() or 0
@@ -409,13 +404,25 @@ class PrinterConnection:
         except Exception:
             subtask = ""
 
-        filaments = self._read_filaments()
+        # One snapshot for everything decoded from the raw report.
+        dump = self._dump()
+        raw_print = self._dump_part(dump, "print")
+        print_payload = raw_print or {}
+        filaments = self._read_filaments(raw_print)
+        developer_mode = protocol.developer_mode(print_payload)
+        # Temperatures, stage, fans, AMS units, door ... (see report.py).
+        try:
+            status = report.status_fields(print_payload, self._dump_part(dump, "info"), self.cfg.model)
+        except Exception as e:  # the decoders are defensive; never lose the read
+            logger.warning("Decoding the report from %s failed: %s", self.cfg.name, e)
+            status = {}
+        try:
+            errors = hms.printer_errors(print_payload)
+        except Exception as e:
+            logger.warning("Decoding the errors from %s failed: %s", self.cfg.name, e)
+            errors = []
 
-        report = self._print_payload() or {}
-        developer_mode = protocol.developer_mode(report)
-        commands_blocked = protocol.commands_blocked(report)
-
-        online = gcode_str != "UNKNOWN" or nozzle_temp is not None
+        online = gcode_str != "UNKNOWN" or status.get("nozzle_temp") is not None
 
         display_name = subtask or file_name
         job = _Job(
@@ -423,7 +430,7 @@ class PrinterConnection:
             gcode_file=file_name,
             subtask=subtask,
             gcode_state=gcode_str,
-            internal=protocol.file_on_internal_storage(report),
+            internal=protocol.file_on_internal_storage(print_payload),
         )
 
         # The thumbnail fields are filled in by read_state.
@@ -432,16 +439,10 @@ class PrinterConnection:
             name=self.cfg.name,
             online=online,
             gcode_state=gcode_str,
-            print_status=status_str,
             progress=progress,
             remaining_minutes=remaining_min,
             current_layer=current_layer,
             total_layers=total_layers,
-            nozzle_temp=nozzle_temp,
-            nozzle_target=None,
-            bed_temp=bed_temp,
-            bed_target=None,
-            chamber_temp=None,
             file_name=display_name,
             print_speed=print_speed,
             light_on=light_on,
@@ -449,11 +450,27 @@ class PrinterConnection:
             camera_available=self.camera.available,
             filaments=filaments,
             developer_mode=developer_mode,
-            commands_blocked=commands_blocked,
+            errors=errors,
             sort=self.cfg.sort,
             timestamp=time.time(),
+            **status,
         )
         return state, job
+
+    async def _ask_version(self) -> None:
+        """Request the module versions (for the firmware); unanswered requests
+        are repeated with a doubling wait (VERSION_RETRY_SECONDS up to
+        VERSION_MAX_RETRY_SECONDS)."""
+        now = time.monotonic()
+        if self._version_asked_at > -math.inf:
+            if now - self._version_asked_at < self._version_wait:
+                return
+            self._version_wait = min(self._version_wait * 2, self.VERSION_MAX_RETRY_SECONDS)
+        self._version_asked_at = now
+        try:
+            await asyncio.to_thread(mqtt.publish, self.printer, mqtt.version_request())
+        except Exception as e:
+            logger.debug("get_version failed for %s: %s", self.cfg.name, e)
 
     # --- Thumbnail ----------------------------------------------------------
 
@@ -535,15 +552,21 @@ class PrinterConnection:
                 self.cfg.name, job.key,
             )
 
-    def _print_payload(self) -> dict | None:
-        """The raw `print` object of the latest reports, or None before any."""
+    def _dump(self) -> dict:
+        """The library's merge of the latest reports ({} before any)."""
         try:
-            dump = self.printer.mqtt_dump() or {}
+            dump = self.printer.mqtt_dump()
         except Exception as e:
             logger.debug("mqtt_dump() failed for %s: %s", self.cfg.name, e)
-            return None
-        payload = dump.get("print") if isinstance(dump, dict) else None
-        return payload if isinstance(payload, dict) else None
+            return {}
+        return dump if isinstance(dump, dict) else {}
+
+    @staticmethod
+    def _dump_part(dump: dict, key: str) -> dict | None:
+        """One top-level object of a dump: `print` (status reports) or `info`
+        (the reply to get_version, see `_ask_version`)."""
+        part = dump.get(key)
+        return part if isinstance(part, dict) else None
 
     # --- Filament helpers -------------------------------------------------
 
@@ -620,7 +643,7 @@ class PrinterConnection:
             name=str(fname),
         )
 
-    def _read_filaments_from_dump(self) -> list[Filament] | None:
+    def _read_filaments_from_dump(self, print_payload: dict | None) -> list[Filament] | None:
         """Read filaments straight from the raw MQTT print payload.
 
         Used for dual-extruder models (H2C / H2D) where the bambulabs_api
@@ -634,7 +657,6 @@ class PrinterConnection:
         only return a non-None list when we actually find something useful;
         otherwise we let the caller fall back to the library helpers.
         """
-        print_payload = self._print_payload()
         if print_payload is None:
             return None
 
@@ -773,7 +795,7 @@ class PrinterConnection:
 
         return out
 
-    def _read_filaments(self) -> list[Filament]:
+    def _read_filaments(self, print_payload: dict | None) -> list[Filament]:
         """Read AMS trays + external spool defensively. Always returns a list.
 
         Strategy: parse the raw MQTT print payload first — that's the only
@@ -787,7 +809,7 @@ class PrinterConnection:
         library helpers so we don't regress on already-working models.
         """
         try:
-            from_dump = self._read_filaments_from_dump()
+            from_dump = self._read_filaments_from_dump(print_payload)
         except Exception as e:
             logger.debug("Dump-based filament read failed for %s: %s", self.cfg.name, e)
             from_dump = None
@@ -806,8 +828,6 @@ class PrinterManager:
     DISCOVERY_MAX_ENTRIES = 64
     # At shutdown, how long to let MQTT teardowns send their DISCONNECTs.
     SHUTDOWN_TEARDOWN_SECONDS = 2.0
-    # Requests that only ask for data; they work without Developer Mode.
-    QUERY_ACTIONS = frozenset({"refresh"})
     # How long the poll loop waits for one printer's poll step (health checks
     # + state read) before broadcasting its last known state instead. The step
     # keeps running; the next round waits on it again rather than starting
@@ -871,6 +891,7 @@ class PrinterManager:
         logger.info("PrinterManager stopped")
 
     async def add_printer(self, cfg: PrinterConfig) -> None:
+        cfg.model = cfg.model or self._announced_model(cfg)
         conn = PrinterConnection(cfg)
         self._connections[cfg.id] = conn
         self._config.printers.append(cfg)
@@ -909,6 +930,7 @@ class PrinterManager:
                 "Failed to back up printer config for %s: %s", conn.cfg.name, e
             )
         await conn.disconnect()
+        cfg.model = cfg.model or self._announced_model(cfg)
         new_conn = PrinterConnection(cfg)
         self._connections[printer_id] = new_conn
         self._config.printers = [
@@ -944,8 +966,43 @@ class PrinterManager:
     def _on_announcement(self, ann: discovery.Announcement) -> None:
         serial = ann.serial.upper()
         self._remember(serial, ann)
-        if any(c.cfg.serial.upper() == serial for c in self._connections.values()):
+        conn = next(
+            (c for c in self._connections.values() if c.cfg.serial.upper() == serial),
+            None,
+        )
+        if conn is not None:
+            self._learn_model(conn, ann)
             self._spawn(self.handle_announcement(ann))
+
+    def _learn_model(self, conn: PrinterConnection, ann: discovery.Announcement) -> None:
+        """Record the model a configured printer announces (backfills old configs).
+
+        Trusted only from the printer's configured IP; a move to a new IP goes
+        through handle_announcement's cert check. Only the field changes and
+        the config is saved: no reconnect and no history backup, since the
+        model just picks the camera's ffmpeg profile for its next session.
+        """
+        if not ann.model or ann.ip != conn.cfg.ip or ann.model == conn.cfg.model:
+            return
+        logger.info(
+            "%s announced model %s (%s)", conn.cfg.name, discovery.model_info(ann.model)[0], ann.model
+        )
+        conn.cfg.model = ann.model
+        conn.camera.model = ann.model
+        for p in self._config.printers:  # conn.cfg is normally this entry already
+            if p.id == conn.cfg.id:
+                p.model = ann.model
+        save_config(self._config)
+
+    def _announced_model(self, cfg: PrinterConfig) -> str:
+        """The model the printer recently announced from cfg's IP, or ""."""
+        entry = self._discovered.get(cfg.serial.upper())
+        if entry is None:
+            return ""
+        ann, seen = entry
+        if ann.ip != cfg.ip or time.monotonic() - seen >= self.DISCOVERY_TTL_SECONDS:
+            return ""
+        return ann.model
 
     async def handle_announcement(self, ann: discovery.Announcement) -> None:
         """Follow a configured printer to the IP it just announced.
@@ -989,7 +1046,9 @@ class PrinterManager:
             if current is not conn or not conn.is_offline():
                 return
             old_ip = conn.cfg.ip
-            new_cfg = conn.cfg.model_copy(update={"ip": ann.ip})
+            new_cfg = conn.cfg.model_copy(
+                update={"ip": ann.ip, "model": ann.model or conn.cfg.model}
+            )
             await self.update_printer(printer_id, new_cfg)
             logger.info("%s moved from %s to %s", new_cfg.name, old_ip, ann.ip)
             await self._broadcast({
@@ -1142,17 +1201,14 @@ class PrinterManager:
         if not conn._connected:
             return False, "Printer not connected"
 
+        # The publish result alone decides; Developer Mode off never fails a
+        # command (see protocol.DEV_MODE_OFF_BIT).
         try:
-            ok, msg = await asyncio.to_thread(
+            return await asyncio.to_thread(
                 self._run_command, conn.printer, action, params or {}
             )
         except Exception as e:
             return False, str(e)
-        if ok and conn.state.commands_blocked and action not in self.QUERY_ACTIONS:
-            # Published, but the printer will drop it. Still sent, so a wrong
-            # detection can never stop commands from working.
-            return False, protocol.COMMANDS_BLOCKED_MESSAGE
-        return ok, msg
 
     @staticmethod
     def _run_command(

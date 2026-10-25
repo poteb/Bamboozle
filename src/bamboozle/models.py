@@ -16,6 +16,9 @@ class PrinterConfig(BaseModel):
     camera_port: int = 6000  # 6000 for A1/P1/P1S, 322 for X1/H2C/H2D/P2
     camera_enabled: bool = False
     sort: int = 0
+    # SSDP DevModel code (e.g. "N7" = P2S, see discovery.model_info); "" until
+    # the printer is heard announcing. Picks the camera's ffmpeg profile.
+    model: str = ""
 
 
 class AppConfig(BaseModel):
@@ -34,12 +37,52 @@ class Filament(BaseModel):
     name: str = ""  # human-readable filament name (sub-brand or id-name)
 
 
+class Nozzle(BaseModel):
+    """One hotend. Dual-nozzle printers (H2C / H2D) list left, then right."""
+    side: Literal["", "left", "right"] = ""  # "" on single-nozzle printers
+    temp: float | None = None
+    target: float | None = None  # None when the report doesn't say
+    type: str = ""  # display name, e.g. "Hardened steel", or a code like "HS01"
+    diameter: float | None = None  # mm
+
+
+class Fans(BaseModel):
+    """Fan speeds in percent; None when the printer doesn't have / report it."""
+    part: int | None = None
+    aux: int | None = None
+    chamber: int | None = None
+    heatbreak: int | None = None
+
+
+class AmsUnit(BaseModel):
+    index: int  # unit id as reported: 0-3 AMS / AMS Lite / AMS 2 Pro, 128+ AMS HT
+    name: str  # e.g. "AMS 1", "AMS HT 1"
+    humidity: int | None = None  # % RH; None without a reading
+    temp: float | None = None  # degrees C; None without a sensor
+
+
+class PrinterError(BaseModel):
+    """A health (HMS) message or print error the printer reports (see hms.py)."""
+    kind: Literal["hms", "print_error"]
+    # As the printer screen shows it: "0701_2000_0002_0001" (HMS), "0300_8003".
+    code: str
+    severity: Literal["", "fatal", "serious", "common", "info"] = ""
+    module: str = ""  # e.g. "AMS 2", "Toolhead"; "" when unknown
+    description: str = ""  # our own words, for the few codes we understand
+    url: str  # Bambu's wiki for the code (their text isn't bundled: licence)
+    # Likely why the job is paused / failed. Otherwise a lingering message:
+    # the printer keeps them until they're acknowledged on it.
+    active: bool = False
+
+
 class PrinterState(BaseModel):
     printer_id: str
     name: str
     online: bool = False
     gcode_state: str = "UNKNOWN"
-    print_status: str = "UNKNOWN"
+    # Current stage (`stg_cur`); None when idle or not reported. 0 = printing.
+    stage: int | None = None
+    stage_name: str = ""
     progress: int = 0
     remaining_minutes: int = 0
     current_layer: int = 0
@@ -48,9 +91,22 @@ class PrinterState(BaseModel):
     nozzle_target: float | None = None
     bed_temp: float | None = None
     bed_target: float | None = None
+    # Every nozzle with its own temperature (two on H2C / H2D); nozzle_temp /
+    # nozzle_target above are the report's flat fields.
+    nozzles: list[Nozzle] = []
+    # None on printers without a chamber sensor (A1, P1).
     chamber_temp: float | None = None
+    chamber_target: float | None = None
     file_name: str = ""
-    print_speed: int = 0
+    print_speed: int = 0  # percent (`spd_mag`)
+    speed_level: int | None = None  # `spd_lvl`: 1 silent .. 4 ludicrous
+    speed_name: str = ""
+    fans: Fans = Fans()
+    ams_units: list[AmsUnit] = []
+    wifi_dbm: int | None = None
+    door_open: bool | None = None  # None: no door sensor reported
+    sdcard: bool | None = None
+    firmware: str = ""
     light_on: bool = False
     camera_enabled: bool = False
     camera_available: bool = False
@@ -60,11 +116,12 @@ class PrinterState(BaseModel):
     # (protocol.THUMBNAIL_INTERNAL_STORAGE: the file isn't on the FTPS share).
     thumbnail_unavailable: Literal["", "internal_storage"] = ""
     filaments: list[Filament] = []
-    error_code: int = 0
+    # HMS messages and the print error; active ones first (see hms.py).
+    errors: list[PrinterError] = []
     # None when the printer doesn't report it (A1 / P1 send no `fun` field).
+    # Informational only: some print controls may be ignored while it's off
+    # (see protocol.py); commands are never failed because of it.
     developer_mode: bool | None = None
-    # The printer is known to drop control commands (see protocol.py).
-    commands_blocked: bool = False
     # Why the connection is down, when known (protocol.AUTH_REJECTED,
     # NO_REPORTS, STALE).
     last_error: Literal["", "auth_rejected", "no_reports", "stale"] = ""
