@@ -212,8 +212,15 @@ async def test_connection(body: PrinterAddRequest) -> dict:
         if not got_status.is_set():
             # A1 / P1S ignore the library's combined on-connect request, so
             # ask for the full status on its own.
-            await asyncio.to_thread(mqtt_client.pushall)
-            await asyncio.to_thread(got_status.wait, TEST_REPORT_TIMEOUT)
+            # Login and serial are proven already, so a failure here only
+            # costs the state; the publish wait has no timeout of its own.
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(mqtt_client.pushall), TEST_REPORT_TIMEOUT
+                )
+                await asyncio.to_thread(got_status.wait, TEST_REPORT_TIMEOUT)
+            except Exception:
+                pass
         state = gcode_state()
         return {
             "success": True,

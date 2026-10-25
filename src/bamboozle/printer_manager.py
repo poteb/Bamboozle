@@ -61,13 +61,14 @@ class PrinterConnection:
         # Set from paho's thread on every CONNACK; kept across reconnects
         # until a login is accepted (or the printer stops answering at all).
         self._auth_rejected = False
-        # Whether the current connect attempt has had its CONNACK yet, so a
-        # retry doesn't act on the previous attempt's refusal.
+        # Whether the current connect attempt's login was accepted or refused
+        # yet, so a retry doesn't act on the previous attempt's refusal.
         self._login_answered = False
         self.printer.mqtt_client.on_connect_handler = self._on_mqtt_connack
 
     def _on_mqtt_connack(self, _mqtt, _client, _userdata, _flags, rc, _props) -> None:
-        self._login_answered = True
+        # _login_answered is set last, so _login_refused() never pairs a new
+        # answer with the previous attempt's flag.
         if protocol.is_auth_refusal(rc):
             if not self._auth_rejected:
                 logger.warning(
@@ -75,10 +76,12 @@ class PrinterConnection:
                     self.cfg.name, self.cfg.ip, rc,
                 )
             self._auth_rejected = True
+            self._login_answered = True
         elif not protocol.connack_failed(rc):
             if self._auth_rejected:
                 logger.info("%s: MQTT login accepted again", self.cfg.name)
             self._auth_rejected = False
+            self._login_answered = True
         # Other refusals (e.g. server unavailable) say nothing about the code.
 
     @property

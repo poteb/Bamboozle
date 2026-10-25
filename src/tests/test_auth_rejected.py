@@ -139,6 +139,23 @@ def test_retry_does_not_act_on_the_previous_attempts_refusal(lan, monkeypatch):
     assert state.last_error == protocol.AUTH_REJECTED  # still the last thing we know
 
 
+def test_retry_refused_for_another_reason_is_not_called_a_bad_code(lan, monkeypatch, caplog):
+    answers = [BAD_PASSWORD, UNAVAILABLE]
+    monkeypatch.setattr(bl.Printer, "mqtt_start", lambda self: connack(self, answers.pop(0)))
+    monkeypatch.setattr(PrinterConnection, "MQTT_GRACE_SECONDS", 60)
+    conn = _conn()
+
+    async def scenario():
+        await conn.connect()
+        caplog.clear()
+        return await conn.connect()
+
+    with caplog.at_level(logging.INFO):
+        ok = asyncio.run(scenario())
+    assert ok is True  # left to paho / the grace period, like any other failure
+    assert "access code wrong" not in caplog.text
+
+
 def test_unreachable_printer_drops_the_access_code_error(lan, monkeypatch):
     """Switched off after a refusal: we know nothing about the code any more."""
     monkeypatch.setattr(bl.Printer, "mqtt_start", lambda self: connack(self, BAD_PASSWORD))
@@ -238,6 +255,18 @@ def test_api_test_succeeds_without_a_status(quick_test_endpoint, monkeypatch):
     """Reports on the serial's topic prove the login and serial; state is a bonus."""
     monkeypatch.setattr(bl.Printer, "mqtt_start", _answer_only_the_version_request)
     monkeypatch.setattr(bl.PrinterMQTTClient, "pushall", lambda mc: True)
+    result = asyncio.run(api_test_connection(_body()))
+    assert result == {"success": True, "message": "Connected successfully"}
+
+
+def test_api_test_survives_a_failing_pushall(quick_test_endpoint, monkeypatch):
+    """Login and serial are already proven; the state is only a bonus."""
+    monkeypatch.setattr(bl.Printer, "mqtt_start", _answer_only_the_version_request)
+
+    def pushall(mc):
+        raise RuntimeError("Message publish failed: The connection was lost.")
+
+    monkeypatch.setattr(bl.PrinterMQTTClient, "pushall", pushall)
     result = asyncio.run(api_test_connection(_body()))
     assert result == {"success": True, "message": "Connected successfully"}
 
