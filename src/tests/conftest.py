@@ -1,6 +1,6 @@
 import pytest
 
-from bamboozle import camera
+from bamboozle import camera, hms_catalog
 from bamboozle.camera import CameraStream
 from fakes import FakeFfmpeg
 
@@ -10,6 +10,15 @@ def isolated_appdata(tmp_path, monkeypatch):
     """Point LOCALAPPDATA at a temp dir so tests never touch the real config."""
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def offline_hms_catalog(monkeypatch):
+    """Never fetch Bambu's HMS catalogue in tests; start each with none loaded."""
+    def no_network(url, timeout, max_bytes):
+        raise OSError("network disabled in tests")
+    monkeypatch.setattr(hms_catalog, "http_get", no_network)
+    monkeypatch.setattr(hms_catalog, "CATALOG", hms_catalog.HmsCatalog())
 
 
 @pytest.fixture

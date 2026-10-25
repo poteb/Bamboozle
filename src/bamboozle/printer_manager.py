@@ -13,7 +13,7 @@ from typing import Any, NamedTuple
 import bambulabs_api as bl
 from fastapi import WebSocket
 
-from . import discovery, hms, mqtt, protocol, report, thumbnail
+from . import discovery, hms, hms_catalog, mqtt, protocol, report, thumbnail
 from .camera import CameraStream
 from .config import _config_dir, save_config
 from .models import AppConfig, Filament, PrinterConfig, PrinterState
@@ -417,7 +417,7 @@ class PrinterConnection:
             logger.warning("Decoding the report from %s failed: %s", self.cfg.name, e)
             status = {}
         try:
-            errors = hms.printer_errors(print_payload)
+            errors = hms_catalog.describe(hms.printer_errors(print_payload), self.cfg.serial)
         except Exception as e:
             logger.warning("Decoding the errors from %s failed: %s", self.cfg.name, e)
             errors = []
@@ -863,6 +863,7 @@ class PrinterManager:
         for pid in list(self._connections):
             self._spawn(self._connect_printer(pid))
         self._poll_task = asyncio.create_task(self._poll_loop())
+        hms_catalog.CATALOG.start(lambda: [c.serial for c in self._config.printers])
         if self._discovery_port is not None:
             self._listener = discovery.SsdpListener(
                 self._on_announcement, port=self._discovery_port
@@ -881,6 +882,7 @@ class PrinterManager:
                 await self._poll_task
             except asyncio.CancelledError:
                 pass
+        await hms_catalog.CATALOG.stop()
         tasks = list(self._tasks)
         for task in tasks:
             task.cancel()
