@@ -542,6 +542,9 @@ class PrinterManager:
 
     # How long to ignore an announced IP whose cert didn't match the serial.
     RELOCATE_RETRY_SECONDS = 60.0
+    # Discovered-printer cache: forget printers not heard from for this long.
+    DISCOVERY_TTL_SECONDS = 300.0
+    DISCOVERY_MAX_ENTRIES = 64
 
     def __init__(
         self, config: AppConfig, discovery_port: int | None = discovery.SSDP_PORT
@@ -553,6 +556,9 @@ class PrinterManager:
         self._prev_states: dict[str, dict] = {}
         self._discovery_port = discovery_port
         self._listener: discovery.SsdpListener | None = None
+        self._listening = False
+        # upper-cased serial -> (latest announcement, monotonic time seen)
+        self._discovered: dict[str, tuple[discovery.Announcement, float]] = {}
         self._relocating: set[str] = set()
         self._rejected: dict[tuple[str, str], float] = {}  # (serial, ip) -> time
         self._tasks: set[asyncio.Task] = set()
@@ -573,13 +579,14 @@ class PrinterManager:
             self._listener = discovery.SsdpListener(
                 self._on_announcement, port=self._discovery_port
             )
-            await self._listener.start()
+            self._listening = await self._listener.start()
         logger.info("PrinterManager started with %d printers", len(self._connections))
 
     async def stop(self) -> None:
         if self._listener:
             self._listener.stop()
             self._listener = None
+        self._listening = False
         if self._poll_task:  # first, so it can't spawn more reconnects
             self._poll_task.cancel()
             try:
@@ -666,6 +673,7 @@ class PrinterManager:
 
     def _on_announcement(self, ann: discovery.Announcement) -> None:
         serial = ann.serial.upper()
+        self._remember(serial, ann)
         if any(c.cfg.serial.upper() == serial for c in self._connections.values()):
             self._spawn(self.handle_announcement(ann))
 
@@ -721,6 +729,50 @@ class PrinterManager:
             })
         finally:
             self._relocating.discard(printer_id)
+
+    # --- Discovered printers (Settings "Discover printers" list) -------------
+
+    @property
+    def discovery_listening(self) -> bool:
+        """True while the SSDP listener is bound and receiving."""
+        return self._listening
+
+    def _remember(self, serial: str, ann: discovery.Announcement) -> None:
+        self._discovered.pop(serial, None)  # re-insert so dict order = recency
+        self._discovered[serial] = (ann, time.monotonic())
+        if len(self._discovered) > self.DISCOVERY_MAX_ENTRIES:
+            self._prune_discovered()
+            while len(self._discovered) > self.DISCOVERY_MAX_ENTRIES:
+                del self._discovered[next(iter(self._discovered))]  # oldest
+
+    def _prune_discovered(self) -> None:
+        now = time.monotonic()
+        self._discovered = {
+            s: (a, t) for s, (a, t) in self._discovered.items()
+            if now - t < self.DISCOVERY_TTL_SECONDS
+        }
+
+    def discovered_printers(self) -> list[dict]:
+        """Recently announced printers that aren't configured, sorted by name."""
+        self._prune_discovered()
+        now = time.monotonic()
+        configured = {c.serial.upper() for c in self._config.printers}
+        result = []
+        for serial, (ann, seen) in self._discovered.items():
+            if serial in configured:
+                continue
+            model_name, camera_port = discovery.model_info(ann.model)
+            result.append({
+                "ip": ann.ip,
+                "serial": ann.serial,
+                "name": ann.name,
+                "model": ann.model,
+                "model_name": model_name,
+                "camera_port": camera_port,
+                "last_seen_s": round(now - seen, 1),
+            })
+        result.sort(key=lambda p: (p["name"].casefold(), p["serial"]))
+        return result
 
     def get_connection(self, printer_id: str) -> PrinterConnection | None:
         return self._connections.get(printer_id)

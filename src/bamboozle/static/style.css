@@ -513,6 +513,71 @@
     opacity: 0.9;
 }
 
+.printer-form .connection-group .discovery {
+    margin-bottom: 0.6rem;
+}
+
+.discovery .discovery-title {
+    display: block;
+    opacity: 0.8;
+    margin-bottom: 0.25rem;
+}
+
+.discovery .discovery-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 10rem;
+    overflow-y: auto;
+}
+
+.discovery .discovery-list li {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.discovery .discovery-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    color: inherit;
+    border: none;
+    border-left: 3px solid transparent;
+    border-radius: 4px;
+    padding: 0.3rem 0.5rem;
+    margin: 0 0 0.15rem;
+    font: inherit;
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+
+.discovery .discovery-item:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.discovery .discovery-item.selected {
+    background: rgba(255, 255, 255, 0.08);
+    border-left-color: var(--pico-primary, #2196f3);
+}
+
+.discovery .discovery-item span {
+    display: block;
+    opacity: 0.7;
+    font-size: 0.8rem;
+}
+
+.discovery .discovery-note {
+    margin: 0;
+    font-size: 0.8rem;
+    opacity: 0.7;
+}
+
+.discovery .discovery-note:empty {
+    display: none;
+}
+
 .printer-form .connection-group #test-btn {
     margin-top: 0.5rem;
 }

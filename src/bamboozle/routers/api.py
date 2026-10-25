@@ -18,6 +18,16 @@ async def list_printers(request: Request) -> dict:
     }
 
 
+@router.get("/discovery")
+async def list_discovered(request: Request) -> dict:
+    """Unconfigured printers recently heard announcing on the LAN."""
+    manager = request.app.state.manager
+    return {
+        "listening": manager.discovery_listening,
+        "printers": manager.discovered_printers(),
+    }
+
+
 @router.get("/printers/{printer_id}")
 async def get_printer(request: Request, printer_id: str) -> dict:
     manager = request.app.state.manager
