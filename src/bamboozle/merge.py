@@ -79,7 +79,10 @@ class MergedReport:
             return Frame()
         info = payload.get("info")
         if isinstance(info, dict) and info.get("command") == "get_version":
-            self.info = copy.deepcopy(info)
+            # Some replies list no modules (the A1 sent one just before the
+            # real one); they mustn't blank the firmware.
+            if isinstance(info.get("module"), list) and info["module"]:
+                self.info = copy.deepcopy(info)
             return Frame(version=True)
         body = payload.get("print")
         if isinstance(body, dict):

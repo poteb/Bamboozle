@@ -83,7 +83,7 @@ def _speed_level(params: dict) -> int:
     level = params.get("level")
     if isinstance(level, bool):
         raise InvalidCommand("Invalid speed level")
-    if isinstance(level, str) and level.strip().isdigit():
+    if isinstance(level, str) and level.strip() in ("1", "2", "3", "4"):
         level = int(level)
     if not isinstance(level, int) or level not in SPEED_LEVELS:
         raise InvalidCommand("Invalid speed level (1 silent, 2 standard, 3 sport, 4 ludicrous)")

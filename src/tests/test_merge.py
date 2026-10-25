@@ -324,3 +324,11 @@ def test_merged_lists_are_capped():
     r.apply(_status(msg=0, things=[{"id": 0}]))
     r.apply(_status(things=[{"id": i} for i in range(1, MAX_MERGED_ITEMS + 50)]))
     assert len(r.print["things"]) == MAX_MERGED_ITEMS
+
+
+def test_an_empty_get_version_reply_does_not_blank_the_firmware():
+    """The A1 sent one with `module: []` just before the real one."""
+    r = MergedReport()
+    r.apply({"info": {"command": "get_version", "module": [{"name": "ota", "sw_ver": "1"}]}})
+    assert r.apply({"info": {"command": "get_version", "module": []}}).version
+    assert r.info["module"] == [{"name": "ota", "sw_ver": "1"}]

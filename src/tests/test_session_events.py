@@ -33,37 +33,68 @@ def _drop(client):
     client._on_disconnect(client.paho, None, None, 7, None)
 
 
-def test_a_dropped_session_is_retired_and_replaced_at_once(lan):
+def test_a_dropped_session_reconnects_at_once_and_keeps_its_card(lan):
     retired = lan
+    reconnects = []
 
     async def scenario():
         conn = _conn()
+        conn.on_reconnect_due = lambda: reconnects.append(conn.needs_reconnect())
         assert await conn.connect()
         old = conn.client
         deliver(old, {"print": {"command": "push_status", "msg": 0, "gcode_state": "RUNNING"}})
-        assert conn.report.print
         _drop(old)
         return conn, old
 
     conn, old = asyncio.run(scenario())
     assert retired == [old]  # with its queue of unacked requests
     assert conn.client is not old
-    assert conn.report.print == {}  # the new session starts empty
-    assert conn._connected is False and conn.needs_reconnect() is False  # backs off first
+    assert conn.report.print["gcode_state"] == "RUNNING"  # no blank card meanwhile
+    assert conn._full_seen is False  # the new session asks for a full report again
+    assert reconnects == [True]  # due now, not after a backoff
 
 
-def test_a_drop_from_a_client_that_never_logged_in_is_left_to_connect(lan, monkeypatch):
-    monkeypatch.setattr(mqtt.BambuClient, "start", lambda self: None)
+def test_a_drop_from_a_session_that_never_reported_backs_off(lan, monkeypatch):
+    """E.g. the broker refused or dropped us before a single report: paho's
+    thread is gone, so the client is replaced now, on the usual backoff."""
+    reconnects = []
 
     async def scenario():
         conn = _conn()
+        conn.on_reconnect_due = lambda: reconnects.append(1)
         await conn.connect()
         client = conn.client
-        _drop(client)  # e.g. a refused login; connect() / the grace handle it
+        _drop(client)
         return conn, client
 
     conn, client = asyncio.run(scenario())
-    assert conn.client is client
+    assert conn.client is not client
+    assert reconnects == [] and conn.needs_reconnect() is False
+
+
+def test_a_drop_from_paho_s_thread_is_handled_on_the_loop(lan):
+    async def scenario():
+        conn = _conn()
+        assert await conn.connect()
+        old = conn.client
+        deliver(old, {"print": {"command": "push_status", "msg": 0, "gcode_state": "IDLE"}})
+        await asyncio.to_thread(_drop, old)
+        await asyncio.sleep(0.02)
+        return conn, old
+
+    conn, old = asyncio.run(scenario())
+    assert conn.client is not old
+
+
+def test_reports_after_disconnect_are_ignored(lan):
+    async def scenario():
+        conn = _conn()
+        await conn.connect()
+        await conn.disconnect()
+        deliver(conn.client, {"print": {"command": "push_status", "msg": 0, "gcode_state": "PAUSE"}})
+        return conn
+
+    assert asyncio.run(scenario()).report.print == {}
 
 
 def test_a_drop_while_settling_fails_the_connect(lan, monkeypatch):

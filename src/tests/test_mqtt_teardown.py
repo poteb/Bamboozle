@@ -12,6 +12,8 @@ from bamboozle.printer_manager import PrinterConnection, PrinterManager
 from bamboozle.routers import api
 from bamboozle.routers.api import test_connection as api_test_connection
 from fakes import connack
+from paho.mqtt.packettypes import PacketTypes
+from paho.mqtt.reasoncodes import ReasonCode
 
 SERIAL = "01P00C511100150"
 
@@ -195,9 +197,9 @@ def test_reset_session_retires_the_client_and_starts_a_fresh_one(lan, blocked_te
     asyncio.run(scenario())
     assert blocked_teardown[0].calls[0] == "disconnect"
     assert conn.client is not old_client
-    # The fresh client reports logins and messages to the connection too.
-    assert conn.client.on_connack == conn._on_mqtt_connack
-    assert conn.client.on_report is not None
+    # The fresh client reports logins to the connection too.
+    connack(conn.client, ReasonCode(PacketTypes.CONNACK, "Not authorized"))
+    assert conn._auth_rejected is True
 
 
 def test_connection_widens_the_inflight_window():

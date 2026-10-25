@@ -6,6 +6,8 @@ from urllib.parse import urlsplit
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from ..printer_manager import CommandResult
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -57,7 +59,11 @@ async def websocket_endpoint(ws: WebSocket):
     async def run_command(printer_id, action, params):
         # A command waits for the printer to confirm it (up to ~10 s); in its
         # own task, so the socket keeps reading meanwhile.
-        result = await manager.execute_command(printer_id, action, params)
+        try:
+            result = await manager.execute_command(printer_id, action, params)
+        except Exception as e:  # never leave a click unanswered
+            logger.exception("Command %s for %s failed", action, printer_id)
+            result = CommandResult(False, f"Command failed: {e}")
         try:
             await ws.send_json({"type": "command_result", "printer_id": printer_id,
                                 "action": action, **result._asdict()})
@@ -73,11 +79,9 @@ async def websocket_endpoint(ws: WebSocket):
                 printer_id = str(data.get("printer_id", ""))
                 action = str(data.get("action", ""))
                 if len(commands) >= MAX_PENDING_COMMANDS:
-                    await ws.send_json({
-                        "type": "command_result", "printer_id": printer_id, "action": action,
-                        "success": False, "confirmed": None,
-                        "message": "Busy: wait for the earlier commands to finish",
-                    })
+                    busy = CommandResult(False, "Busy: wait for the earlier commands to finish")
+                    await ws.send_json({"type": "command_result", "printer_id": printer_id,
+                                        "action": action, **busy._asdict()})
                     continue
                 task = asyncio.create_task(run_command(printer_id, action, data.get("params") or {}))
                 commands.add(task)

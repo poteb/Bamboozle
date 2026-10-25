@@ -235,3 +235,33 @@ def test_a_confirmed_command_updates_the_card_before_answering():
     result, sent = asyncio.run(scenario())
     assert result.confirmed is True
     assert sent and sent[-1]["printers"]["p1"]["gcode_state"] == "PAUSE"
+
+
+def test_a_refusal_on_a_developer_mode_off_printer_says_why_it_may_be():
+    async def scenario():
+        mgr, conn = _setup({"gcode_state": "RUNNING", "fun": H2C_FUN})
+        await conn.read_state()
+        task = asyncio.create_task(mgr.execute_command("p1", "pause"))
+        await asyncio.sleep(0.02)
+        seq = published(conn)[0]["print"]["sequence_id"]
+        deliver(conn.client, {"print": {"command": "pause", "sequence_id": seq, "result": "failed"}})
+        return await task
+
+    result = asyncio.run(scenario())
+    assert result.success is False and "Developer Mode is off" in result.message
+
+
+def test_a_command_waiting_when_the_printer_is_removed_is_settled_at_once():
+    async def scenario():
+        mgr, conn = _setup({"gcode_state": "RUNNING"})
+        task = asyncio.create_task(mgr.execute_command("p1", "pause"))
+        await asyncio.sleep(0.02)
+        started = asyncio.get_running_loop().time()
+        await mgr.remove_printer("p1")
+        result = await task
+        return result, asyncio.get_running_loop().time() - started, published(conn)
+
+    result, took, sent = asyncio.run(scenario())
+    assert result.confirmed is False and "removed" in result.message
+    assert took < CONFIRM / 2
+    assert [list(p) for p in sent] == [["print"]]  # no midway pushall to a retired client

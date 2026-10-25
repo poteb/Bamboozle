@@ -266,8 +266,8 @@ def retire(client: Any) -> threading.Thread | None:
 
 def _shutdown(client: Any) -> None:
     _attempt(client.disconnect)
-    # If paho was mid-reconnect, that disconnect found no socket and the
-    # handshake may complete afterwards. paho's loop then ignores loop_stop's
+    # If paho was still retrying the first connection, that disconnect found
+    # no socket and the handshake may complete afterwards. paho's loop then ignores loop_stop's
     # terminate flag while QoS 1 requests are unacked, so watch the join and
     # disconnect again whenever the session shows up connected.
     stopper = threading.Thread(

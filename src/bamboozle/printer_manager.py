@@ -132,8 +132,11 @@ class PrinterConnection:
         # Only touched on the event loop.
         self.report = MergedReport()
         # Called on the event loop whenever the state may have changed (the
-        # manager pushes a debounced update).
+        # manager pushes a debounced update), and when a dropped session should
+        # reconnect now rather than at the next poll round.
         self.on_change: Callable[[], None] = lambda: None
+        self.on_reconnect_due: Callable[[], None] = lambda: None
+        self._closed = False  # disconnect() was called: this connection is done
         self._loop: asyncio.AbstractEventLoop | None = None
         self._waiters: set[_Waiter] = set()
         self.thumbnail: bytes | None = None
@@ -178,7 +181,7 @@ class PrinterConnection:
         """A fresh MQTT client, wired to this connection. Its reports are
         tagged with it, so a retired client's late ones are dropped."""
         client = mqtt.BambuClient(self.cfg.ip, self.cfg.access_code, self.cfg.serial)
-        client.on_connack = self._on_mqtt_connack
+        client.on_connack = lambda rc: self._on_mqtt_connack(client, rc)
         client.on_report = lambda payload: self._on_mqtt_report(client, payload)
         client.on_disconnect = lambda: self._to_loop(self._on_drop, client)
         return client
@@ -186,7 +189,7 @@ class PrinterConnection:
     # --- paho's network thread -------------------------------------------------
 
     def _on_mqtt_report(self, client: mqtt.BambuClient, payload: dict) -> None:
-        if client is not self.client:
+        if client is not self.client or self._closed:
             return  # a retired client's callback that was already running
         self._last_report = time.monotonic()
         self._reports += 1
@@ -194,7 +197,9 @@ class PrinterConnection:
         self._down_reason = ""
         self._to_loop(self._ingest, client, payload)
 
-    def _on_mqtt_connack(self, rc: Any) -> None:
+    def _on_mqtt_connack(self, client: mqtt.BambuClient, rc: Any) -> None:
+        if client is not self.client or self._closed:
+            return  # a retired client's callback that was already running
         # _login_answered is set last, so _login_refused() never pairs a new
         # answer with the previous attempt's flag.
         if protocol.is_auth_refusal(rc):
@@ -246,8 +251,8 @@ class PrinterConnection:
     def _ingest(self, client: mqtt.BambuClient, payload: dict) -> None:
         """Merge one report, settle the commands it confirms, and say the
         state may have changed."""
-        if client is not self.client:
-            return  # from a client that has been replaced meanwhile
+        if client is not self.client or self._closed:
+            return  # from a client that has been replaced (or closed) meanwhile
         try:
             frame = self.report.apply(payload)
         except Exception:
@@ -259,13 +264,26 @@ class PrinterConnection:
         self._changed()
 
     def _on_drop(self, client: mqtt.BambuClient) -> None:
-        """The current client lost its session. paho doesn't reconnect it (a
-        reconnect would replay unacked commands, see mqtt.py): retire it and
-        let the reconnect start a fresh one."""
-        if client is not self.client or not client.connected_once:
-            return  # replaced already, or never logged in (connect() handles that)
-        logger.warning("%s: MQTT session to %s dropped; reconnecting", self.cfg.name, self.cfg.ip)
-        self._reset_now()
+        """The current client lost its connection. paho doesn't reconnect it
+        (a reconnect would replay unacked commands, see mqtt.py): retire it
+        and start a fresh one.
+
+        A session that was delivering reports reconnects right away and keeps
+        its merged report (the new session's pushall refreshes it), so a Wi-Fi
+        blip doesn't blank the card. Anything else (never logged in, never
+        reported, or dropped while connect() settles, which then fails) backs
+        off as usual.
+        """
+        if client is not self.client or self._closed:
+            return
+        if client.connected_once and self._reports and not self._connecting:
+            logger.warning("%s: MQTT session to %s dropped; reconnecting", self.cfg.name, self.cfg.ip)
+            self._reset_now(keep_report=True)
+            self._retry_at = time.monotonic()  # no backoff for a session that worked
+            self.on_reconnect_due()
+        else:
+            # paho's thread is gone, so don't wait out the grace period.
+            self._reset_now()
 
     @property
     def connecting(self) -> bool:
@@ -305,8 +323,7 @@ class PrinterConnection:
                 return False  # the session dropped while settling; a retry is scheduled
             self._connected = True
             if self._login_refused():
-                # paho would keep retrying the bad code every few seconds;
-                # stop it and retry on our own (backed-off) schedule instead.
+                # Retry on our own (backed-off) schedule, with a fresh client.
                 logger.error(
                     "%s: connection refused at %s: access code wrong or changed",
                     self.cfg.name, self.cfg.ip,
@@ -318,11 +335,11 @@ class PrinterConnection:
             return True
         except asyncio.TimeoutError:
             logger.error("Timeout connecting to %s (%s)", self.cfg.name, self.cfg.ip)
-            self._schedule_retry()
+            self._reset_now()  # its paho thread may still start: never reuse it
             return False
         except Exception as e:
             logger.error("Failed to connect to %s: %s", self.cfg.name, e)
-            self._schedule_retry()
+            self._reset_now()
             return False
         finally:
             self._changed()
@@ -341,7 +358,13 @@ class PrinterConnection:
         )
 
     async def disconnect(self) -> None:
-        """Stop the camera and end the MQTT session. Never waits on paho."""
+        """Stop the camera and end the MQTT session for good (the connection
+        is being removed or replaced). Never waits on paho."""
+        self._closed = True
+        for waiter in list(self._waiters):
+            if not waiter.future.done():
+                waiter.future.set_result(False)  # settled: the connection is gone
+        self._waiters.clear()
         self._cancel_thumbnail_fetch()
         try:
             await asyncio.to_thread(self.camera.stop)
@@ -433,11 +456,12 @@ class PrinterConnection:
         """
         self._reset_now()
 
-    def _reset_now(self) -> None:
+    def _reset_now(self, keep_report: bool = False) -> None:
         mqtt.retire(self.client)
         self._schedule_retry()
         self.client = self._new_client()
-        self.report.reset()
+        if not keep_report:
+            self.report.reset()
         self._full_seen = False
         # A new session has no version reply yet: ask the new one right away.
         self._version_asked_at = -math.inf
@@ -516,21 +540,29 @@ class PrinterConnection:
             sent = await asyncio.to_thread(self._publish_all, command.requests)
             if not sent:
                 return CommandResult(False, "Not sent: printer not connected")
-            if await self._confirmed_within(waiter, self.COMMAND_CONFIRM_SECONDS / 2):
-                return CommandResult(True, command.done, True)
-            if command.pushall_midway:
+            confirmed = await self._confirmed_within(waiter, self.COMMAND_CONFIRM_SECONDS / 2)
+            if confirmed is None and command.pushall_midway and not self._closed:
                 await self._pushall()  # the full report shows what a delta may not
-            if await self._confirmed_within(waiter, self.COMMAND_CONFIRM_SECONDS / 2):
+                confirmed = await self._confirmed_within(waiter, self.COMMAND_CONFIRM_SECONDS / 2)
+            if confirmed:
                 return CommandResult(True, command.done, True)
+            if self._closed:
+                return CommandResult(
+                    True, f"{command.label} sent, but the printer was reconfigured or removed "
+                    "before it confirmed it", False)
+            dev_mode_hint = (
+                " (Developer Mode is off: the printer may ignore print controls)"
+                if command.print_control and self.state.developer_mode is False else ""
+            )
             if waiter.refused is not None:
+                # The printer's own answer, not our guess from the `fun` bit.
                 reason = waiter.refused.reason or waiter.refused.result
-                return CommandResult(False, f"Printer refused {command.label.lower()}: {reason}", False)
+                return CommandResult(
+                    False, f"Printer refused {command.label.lower()}: {reason}{dev_mode_hint}", False)
             message = (
                 f"{command.label} sent, but not confirmed: the printer didn't report "
-                f"{command.waiting_for} within {self.COMMAND_CONFIRM_SECONDS:.0f} s"
+                f"{command.waiting_for} within {self.COMMAND_CONFIRM_SECONDS:.0f} s{dev_mode_hint}"
             )
-            if command.print_control and self.state.developer_mode is False:
-                message += " (Developer Mode is off: the printer may ignore print controls)"
             return CommandResult(True, message, False)
         finally:
             self._waiters.discard(waiter)
@@ -538,12 +570,13 @@ class PrinterConnection:
                 waiter.future.cancel()
 
     @staticmethod
-    async def _confirmed_within(waiter: _Waiter, seconds: float) -> bool:
+    async def _confirmed_within(waiter: _Waiter, seconds: float) -> bool | None:
+        """True: confirmed. False: settled without (the connection closed).
+        None: still waiting after `seconds`."""
         try:
-            await asyncio.wait_for(asyncio.shield(waiter.future), seconds)
-            return True
+            return await asyncio.wait_for(asyncio.shield(waiter.future), seconds)
         except asyncio.TimeoutError:
-            return False
+            return None
 
     def _publish_all(self, requests: list[dict]) -> bool:
         # A list, not a generator: every request is tried even if one fails.
@@ -708,6 +741,7 @@ class PrinterManager:
         # One broadcast at a time, so a client never gets an older state
         # after a newer one.
         self._broadcast_lock = asyncio.Lock()
+        self._stopping = False
         self._last_heartbeat = time.monotonic()
         self._discovery_port = discovery_port
         self._listener: discovery.SsdpListener | None = None
@@ -741,6 +775,7 @@ class PrinterManager:
         logger.info("PrinterManager started with %d printers", len(self._connections))
 
     async def stop(self) -> None:
+        self._stopping = True  # no new pushes or reconnects from late callbacks
         if self._listener:
             self._listener.stop()
             self._listener = None
@@ -832,7 +867,12 @@ class PrinterManager:
     def _new_connection(self, cfg: PrinterConfig) -> PrinterConnection:
         conn = PrinterConnection(cfg)
         conn.on_change = lambda: self._mark_dirty(cfg.id, conn)
+        conn.on_reconnect_due = lambda: self._reconnect_now(cfg.id, conn)
         return conn
+
+    def _reconnect_now(self, pid: str, conn: PrinterConnection) -> None:
+        if not self._stopping and self._connections.get(pid) is conn and conn.needs_reconnect():
+            self._spawn(self._connect_printer(pid))
 
     def _spawn(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
@@ -1007,7 +1047,7 @@ class PrinterManager:
         reporting every second still gets an update per report. One push
         serves every printer that changed meanwhile (one message, one
         dashboard re-render)."""
-        if self._connections.get(pid) is not conn:
+        if self._stopping or self._connections.get(pid) is not conn:
             return
         self._dirty.add(pid)
         if self._push_handle is None:

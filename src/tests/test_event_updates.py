@@ -174,3 +174,15 @@ def test_shutdown_cancels_a_pending_push():
         return _updates(ws)
 
     assert asyncio.run(scenario()) == []
+
+
+def test_reports_after_shutdown_push_nothing():
+    async def scenario():
+        mgr, ws = _manager("a")
+        await mgr.stop()
+        mgr.get_connection("a").on_change()  # a late callback
+        await asyncio.sleep(DEBOUNCE * 3)
+        return _updates(ws), mgr._push_handle
+
+    updates, handle = asyncio.run(scenario())
+    assert updates == [] and handle is None
