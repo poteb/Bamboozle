@@ -162,6 +162,7 @@ def test_notices_never_explain_a_stopped_job():
 @pytest.mark.parametrize("payload", [
     {"gcode_state": "FAILED", "print_error": 0x0300400C},   # cancelled by the user
     {"gcode_state": "FAILED", "print_error": 0x0500400E},
+    {"gcode_state": "FAILED", "print_error": 0},            # cleared, or no echo sent
     {"gcode_state": "PAUSE", "stg_cur": 16},                # paused by the user
     {"gcode_state": "PAUSE", "stg_cur": "30"},              # paused by the G-code
     {"gcode_state": "PAUSE", "stg_cur": 5},                 # M400 pause

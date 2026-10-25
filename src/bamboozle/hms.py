@@ -132,15 +132,15 @@ def print_error(print_payload: dict) -> PrinterError | None:
 
 
 def _stopped_by_fault(print_payload: dict) -> bool:
-    """The job is paused or failed, and not by the user or the G-code."""
-    if print_payload.get("gcode_state") not in _STOPPED_JOB:
-        return False
-    if stage(print_payload) in _USER_PAUSE_STAGES:
-        return False
-    value = _print_error_value(print_payload.get("print_error"))
-    if value and _short_code((value >> 16) & 0xFFFF, value & 0xFFFF) in _USER_CANCEL:
-        return False
-    return True
+    """The job is paused or failed, and not by the user or the G-code.
+
+    A failed job counts only with a real print error: a cancel (its echo is
+    filtered out) or a cleared print_error leaves the job FAILED too.
+    """
+    gcode_state = print_payload.get("gcode_state")
+    if gcode_state == "FAILED":
+        return print_error(print_payload) is not None
+    return gcode_state in _STOPPED_JOB and stage(print_payload) not in _USER_PAUSE_STAGES
 
 
 def _explains_stop(e: PrinterError) -> bool:
