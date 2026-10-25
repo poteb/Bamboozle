@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
+from .. import discovery
 from ..config import save_config
 from ..models import PrinterAddRequest, PrinterConfig, PrinterState, PrinterUpdateRequest
 
@@ -151,6 +152,12 @@ async def test_connection(body: PrinterAddRequest) -> dict:
     """Test connecting to a printer without saving it."""
     import bambulabs_api as bl
     import asyncio
+
+    reachable = await asyncio.to_thread(
+        discovery.tcp_reachable, body.ip, discovery.MQTT_PORT
+    )
+    if not reachable:
+        return {"success": False, "message": f"printer unreachable at {body.ip}"}
 
     printer = bl.Printer(body.ip, body.access_code, body.serial)
     try:

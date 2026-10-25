@@ -8,7 +8,7 @@ Bamboozle is a local FastAPI web client that monitors and controls Bambu Lab 3D 
 
 ## Running
 
-The app is a Python package run as a module; there is no installer, test suite, or linter configured.
+The app is a Python package run as a module; there is no installer or linter configured.
 
 ```bash
 cd src
@@ -16,6 +16,8 @@ py -m bamboozle.main           # or: python -m bamboozle.main
 ```
 
 `src/run.bat` is the Windows launcher — it probes the Python Manager install (`%LOCALAPPDATA%\Python\pythoncore-3.14-64`), then `py`, then `python` on PATH. Dependencies in `src/requirements.txt` must be installed into whichever interpreter is used (`pip install -r src/requirements.txt`). Python 3.10+ required (3.14 used in practice).
+
+Tests: `pip install -r src/requirements-dev.txt`, then run `python -m pytest` from `src/` (`src/pytest.ini` sets `pythonpath = .`). `tests/conftest.py` points `LOCALAPPDATA` at a temp dir so tests never touch the real config. Network adapters (`discovery.tcp_reachable`, `discovery.fetch_cert_common_name`) are monkeypatched in tests; `PrinterManager(..., discovery_port=None)` disables the UDP listener.
 
 Working directory matters: `main.py` mounts static files with the relative path `bamboozle/static`, so the server must be launched from `src/`.
 
@@ -51,6 +53,10 @@ Thumbnails are fetched once per new print job (keyed on `subtask_name` or `file_
 - **Port 322** (X1 / X1C / H2C / H2D / P2): RTSPS via `ffmpeg` subprocess piping MJPEG to stdout, parsed for JPEG SOI/EOI markers. `ffmpeg` is discovered via PATH or `Program Files\*ffmpeg*\bin\ffmpeg.exe`; if missing, the RTSP stream disables itself.
 
 Both protocols run in a dedicated thread with exponential backoff reconnect (3s → 60s) and expose the latest frame via `get_frame()` behind a lock.
+
+Before `mqtt_start`, `PrinterConnection.connect` (and `POST /api/printers/test`) TCP-probes port 8883 and reports "printer unreachable at <ip>" on failure — `mqtt_start` itself is paho `connect_async` and never fails, which used to surface only as the library's "Printer Values Not Available Yet". The poll loop schedules reconnects as background tasks so an unreachable printer can't stall updates.
+
+**IP auto-detect** (`discovery.py`): `SsdpListener` passively listens on UDP 2021 (SO_REUSEADDR, shared with Bambu Studio; bind failure just disables the feature) for Bambu SSDP announcements (`Location` = IP, `USN` = serial). `PrinterManager.handle_announcement` matches on serial only (printers behind a repeater share one MAC), acts only when the printer isn't healthy at its saved IP, requires the TLS cert CN at the new IP to equal the serial (true for A1, P1S, H2C, P2S), then goes through `update_printer` and broadcasts `{"type": "notice"}` (shown as a toast).
 
 **Commands** (pause/resume/stop/light/speed) go through `PrinterManager.execute_command` → `asyncio.to_thread(_run_command)` → `bambulabs_api` methods. The chamber light uses a hand-rolled `ledctrl` MQTT publish (`_set_light`) because it works across all models where the library helper doesn't.
 
