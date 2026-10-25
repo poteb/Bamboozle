@@ -13,7 +13,7 @@ from typing import Any, NamedTuple
 import bambulabs_api as bl
 from fastapi import WebSocket
 
-from . import discovery, mqtt, protocol, thumbnail
+from . import discovery, mqtt, protocol, report, thumbnail
 from .camera import CameraStream
 from .config import _config_dir, save_config
 from .models import AppConfig, Filament, PrinterConfig, PrinterState
@@ -92,6 +92,8 @@ class PrinterConnection:
     # printer is not looked up again.
     THUMB_RETRY_SECONDS = 60.0
     THUMB_MAX_RETRY_SECONDS = 900.0
+    # Until the firmware version is known, ask for it this often.
+    VERSION_RETRY_SECONDS = 60.0
     _JOB_ACTIVE = frozenset({"PREPARE", "RUNNING"})
     _JOB_ENDED = frozenset({"FINISH", "FAILED", "IDLE"})
 
@@ -132,6 +134,7 @@ class PrinterConnection:
         # Why the last session was dropped for silence (protocol.NO_REPORTS /
         # STALE); kept until a report arrives or the printer stops answering.
         self._down_reason = ""
+        self._version_asked_at = -math.inf  # monotonic; get_version last sent
         self.printer = self._new_printer()
 
     def _new_printer(self) -> bl.Printer:
@@ -325,6 +328,8 @@ class PrinterConnection:
         try:
             state_data, job = await asyncio.to_thread(self._read_sync)
             state_data.last_error = self._down_reason  # until the first report
+            if state_data.online and not state_data.firmware:
+                await self._ask_version()
             self._update_thumbnail(job)
             state_data.has_thumbnail = self.thumbnail is not None
             state_data.thumbnail_key = self._thumb_key  # set and cleared with it
@@ -348,12 +353,6 @@ class PrinterConnection:
             gcode_str = "UNKNOWN"
 
         try:
-            print_status = p.get_current_state()
-            status_str = print_status.name if print_status else "UNKNOWN"
-        except Exception:
-            status_str = "UNKNOWN"
-
-        try:
             progress = p.get_percentage() or 0
         except Exception:
             progress = 0
@@ -367,16 +366,6 @@ class PrinterConnection:
                 remaining_min = 0
         except Exception:
             remaining_min = 0
-
-        try:
-            nozzle_temp = p.get_nozzle_temperature()
-        except Exception:
-            nozzle_temp = None
-
-        try:
-            bed_temp = p.get_bed_temperature()
-        except Exception:
-            bed_temp = None
 
         try:
             current_layer = p.current_layer_num() or 0
@@ -411,10 +400,13 @@ class PrinterConnection:
 
         filaments = self._read_filaments()
 
-        report = self._print_payload() or {}
-        developer_mode = protocol.developer_mode(report)
+        dump = self._dump()
+        print_payload = self._dump_part(dump, "print") or {}
+        developer_mode = protocol.developer_mode(print_payload)
+        # Temperatures, stage, fans, AMS units, door ... (see report.py).
+        status = report.status_fields(print_payload, self._dump_part(dump, "info"), self.cfg.model)
 
-        online = gcode_str != "UNKNOWN" or nozzle_temp is not None
+        online = gcode_str != "UNKNOWN" or status["nozzle_temp"] is not None
 
         display_name = subtask or file_name
         job = _Job(
@@ -422,7 +414,7 @@ class PrinterConnection:
             gcode_file=file_name,
             subtask=subtask,
             gcode_state=gcode_str,
-            internal=protocol.file_on_internal_storage(report),
+            internal=protocol.file_on_internal_storage(print_payload),
         )
 
         # The thumbnail fields are filled in by read_state.
@@ -431,16 +423,10 @@ class PrinterConnection:
             name=self.cfg.name,
             online=online,
             gcode_state=gcode_str,
-            print_status=status_str,
             progress=progress,
             remaining_minutes=remaining_min,
             current_layer=current_layer,
             total_layers=total_layers,
-            nozzle_temp=nozzle_temp,
-            nozzle_target=None,
-            bed_temp=bed_temp,
-            bed_target=None,
-            chamber_temp=None,
             file_name=display_name,
             print_speed=print_speed,
             light_on=light_on,
@@ -450,8 +436,21 @@ class PrinterConnection:
             developer_mode=developer_mode,
             sort=self.cfg.sort,
             timestamp=time.time(),
+            **status,
         )
         return state, job
+
+    async def _ask_version(self) -> None:
+        """Request the module versions (for the firmware), at most once per
+        VERSION_RETRY_SECONDS."""
+        now = time.monotonic()
+        if now - self._version_asked_at < self.VERSION_RETRY_SECONDS:
+            return
+        self._version_asked_at = now
+        try:
+            await asyncio.to_thread(mqtt.publish, self.printer, mqtt.version_request())
+        except Exception as e:
+            logger.debug("get_version failed for %s: %s", self.cfg.name, e)
 
     # --- Thumbnail ----------------------------------------------------------
 
@@ -533,15 +532,25 @@ class PrinterConnection:
                 self.cfg.name, job.key,
             )
 
-    def _print_payload(self) -> dict | None:
-        """The raw `print` object of the latest reports, or None before any."""
+    def _dump(self) -> dict:
+        """The library's merge of the latest reports ({} before any)."""
         try:
-            dump = self.printer.mqtt_dump() or {}
+            dump = self.printer.mqtt_dump()
         except Exception as e:
             logger.debug("mqtt_dump() failed for %s: %s", self.cfg.name, e)
-            return None
-        payload = dump.get("print") if isinstance(dump, dict) else None
-        return payload if isinstance(payload, dict) else None
+            return {}
+        return dump if isinstance(dump, dict) else {}
+
+    @staticmethod
+    def _dump_part(dump: dict, key: str) -> dict | None:
+        """One top-level object of a dump: `print` (status reports) or `info`
+        (the get_version reply the library requests on connect)."""
+        part = dump.get(key)
+        return part if isinstance(part, dict) else None
+
+    def _print_payload(self) -> dict | None:
+        """The raw `print` object of the latest reports, or None before any."""
+        return self._dump_part(self._dump(), "print")
 
     # --- Filament helpers -------------------------------------------------
 

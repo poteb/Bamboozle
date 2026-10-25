@@ -37,12 +37,38 @@ class Filament(BaseModel):
     name: str = ""  # human-readable filament name (sub-brand or id-name)
 
 
+class Nozzle(BaseModel):
+    """One hotend. Dual-nozzle printers (H2C / H2D) list left, then right."""
+    side: Literal["", "left", "right"] = ""  # "" on single-nozzle printers
+    temp: float | None = None
+    target: float | None = None  # None when the report doesn't say
+    type: str = ""  # display name, e.g. "Hardened steel", or a code like "HS01"
+    diameter: float | None = None  # mm
+
+
+class Fans(BaseModel):
+    """Fan speeds in percent; None when the printer doesn't have / report it."""
+    part: int | None = None
+    aux: int | None = None
+    chamber: int | None = None
+    heatbreak: int | None = None
+
+
+class AmsUnit(BaseModel):
+    index: int  # unit id as reported: 0-3 AMS / AMS Lite / AMS 2 Pro, 128+ AMS HT
+    name: str  # e.g. "AMS 1", "AMS HT 1"
+    humidity: int | None = None  # % RH; None without a reading
+    temp: float | None = None  # degrees C; None without a sensor
+
+
 class PrinterState(BaseModel):
     printer_id: str
     name: str
     online: bool = False
     gcode_state: str = "UNKNOWN"
-    print_status: str = "UNKNOWN"
+    # Current stage (`stg_cur`); None when idle or not reported. 0 = printing.
+    stage: int | None = None
+    stage_name: str = ""
     progress: int = 0
     remaining_minutes: int = 0
     current_layer: int = 0
@@ -51,9 +77,22 @@ class PrinterState(BaseModel):
     nozzle_target: float | None = None
     bed_temp: float | None = None
     bed_target: float | None = None
+    # Every nozzle with its own temperature (two on H2C / H2D); nozzle_temp /
+    # nozzle_target above are the report's flat fields.
+    nozzles: list[Nozzle] = []
+    # None on printers without a chamber sensor (A1, P1).
     chamber_temp: float | None = None
+    chamber_target: float | None = None
     file_name: str = ""
-    print_speed: int = 0
+    print_speed: int = 0  # percent (`spd_mag`)
+    speed_level: int | None = None  # `spd_lvl`: 1 silent .. 4 ludicrous
+    speed_name: str = ""
+    fans: Fans = Fans()
+    ams_units: list[AmsUnit] = []
+    wifi_dbm: int | None = None
+    door_open: bool | None = None  # None: no door sensor reported
+    sdcard: bool | None = None
+    firmware: str = ""
     light_on: bool = False
     camera_enabled: bool = False
     camera_available: bool = False
