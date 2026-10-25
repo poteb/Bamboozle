@@ -70,7 +70,7 @@ Before `mqtt_start`, `PrinterConnection.connect` (and `POST /api/printers/test`)
 - `ws.py` — WebSocket endpoint the dashboard subscribes to for push updates.
 - `stream.py` — MJPEG camera passthrough.
 
-**Frontend** is plain HTML/JS/CSS in `bamboozle/templates/` and `bamboozle/static/` (no build step). On load the dashboard fetches `GET /api/printers` over HTTP and renders right away (browsers can throttle WS reconnects, Firefox by up to ~60s), then opens a WebSocket and re-renders on each `init`/`update`. Once any WS state has been applied, a late HTTP response is ignored. `#ws-status` ("Reconnecting…") shows while the WS isn't open, after a 1s grace period from page load.
+**Frontend** is plain HTML/JS/CSS in `bamboozle/templates/` and `bamboozle/static/` (no build step). On load the dashboard fetches `GET /api/printers` over HTTP and renders right away (browsers can throttle WS reconnects, Firefox by up to ~60s), then opens a WebSocket and re-renders on each `init`/`update`. Once any WS state has been applied, a late HTTP response is ignored. A WS `init` replaces the printer set; `update` merges. `#ws-status` ("Reconnecting…") shows while the WS isn't open, after a 1s grace period from page load (`WS_MARKER_GRACE_MS`); it is hidden by being empty (`:empty`), so its `role="status"` live region announces the text. While the WS isn't open, `sendCommand` falls back to the REST action endpoints (`/api/printers/{id}/pause|resume|stop|light|speed`) and toasts the result.
 
 ## Task workflow (Docket)
 

@@ -81,7 +81,7 @@
     color: var(--pico-muted-color);
 }
 
-.ws-status[hidden] {
+.ws-status:empty {
     display: none;
 }
 
@@ -92,6 +92,12 @@
     border-radius: 50%;
     background: var(--status-paused);
     animation: pulse 2s infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .ws-status::before {
+        animation: none;
+    }
 }
 
 /* Printer Grid */

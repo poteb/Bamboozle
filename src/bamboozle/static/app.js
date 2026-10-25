@@ -181,8 +181,13 @@ class BamboozleApp {
     _updateWsMarker() {
         const marker = document.getElementById('ws-status');
         if (!marker) return;
-        const open = this.ws && this.ws.readyState === WebSocket.OPEN;
-        marker.hidden = !this._wsMarkerArmed || open;
+        // Text toggles visibility (CSS hides it when empty) and lets the
+        // role="status" live region announce the change.
+        marker.textContent = this._wsMarkerArmed && !this._wsOpen() ? 'Reconnecting…' : '';
+    }
+
+    _wsOpen() {
+        return !!this.ws && this.ws.readyState === WebSocket.OPEN;
     }
 
     _initSortControls() {
@@ -265,6 +270,8 @@ class BamboozleApp {
     onMessage(msg) {
         if (msg.type === 'init' || msg.type === 'update') {
             this._wsStateReceived = true;
+            // init is the full set: drop printers removed while we weren't listening.
+            if (msg.type === 'init') this.printers = {};
             for (const [id, state] of Object.entries(msg.printers)) {
                 this.printers[id] = state;
             }
@@ -805,13 +812,46 @@ class BamboozleApp {
     }
 
     sendCommand(printerId, action, params = {}) {
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        if (this._wsOpen()) {
             this.ws.send(JSON.stringify({
                 type: 'command',
                 printer_id: printerId,
                 action,
                 params,
             }));
+            return;
+        }
+        // Cards can render from HTTP long before the WS opens, so don't drop
+        // the click: use the matching REST endpoint instead.
+        return this._sendCommandHttp(printerId, action, params);
+    }
+
+    async _sendCommandHttp(printerId, action, params) {
+        const route = {
+            pause: ['pause'],
+            resume: ['resume'],
+            stop: ['stop'],
+            light_on: ['light', { on: true }],
+            light_off: ['light', { on: false }],
+            set_speed: ['speed', { level: params.level }],
+        }[action];
+        if (!route) {
+            this.showToast('Not connected — reconnecting', 'error');
+            return;
+        }
+        const [path, body] = route;
+        const opts = { method: 'POST' };
+        if (body) {
+            opts.headers = { 'Content-Type': 'application/json' };
+            opts.body = JSON.stringify(body);
+        }
+        try {
+            const res = await fetch(`/api/printers/${encodeURIComponent(printerId)}/${path}`, opts);
+            const json = await res.json();
+            this.showToast(json.message || (json.success ? 'Done' : 'Command failed'),
+                json.success ? 'success' : 'error');
+        } catch {
+            this.showToast('Command failed: server unreachable', 'error');
         }
     }
 
