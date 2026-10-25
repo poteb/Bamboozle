@@ -821,7 +821,8 @@ class BamboozleApp {
         if (!notice) return '';
         if (!notice.quiet) return this.esc(notice.text);
         return `<details><summary>${this.esc(notice.text)}</summary>`
-            + `<div class="card-notice-detail">${this.esc(notice.title)}</div></details>`;
+            // aria-live off: opening it isn't a status change to announce.
+            + `<div class="card-notice-detail" aria-live="off">${this.esc(notice.title)}</div></details>`;
     }
 
     _noticeKey(notice) {
@@ -962,10 +963,11 @@ class BamboozleApp {
         setTimeout(() => toast.remove(), 4000);
     }
 
+    // Safe in text and in double-quoted attributes.
     esc(str) {
         const d = document.createElement('div');
         d.textContent = str;
-        return d.innerHTML;
+        return d.innerHTML.replace(/"/g, '&quot;');
     }
 }
 

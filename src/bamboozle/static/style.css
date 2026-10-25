@@ -322,6 +322,17 @@
     display: none;
 }
 
+.card-notice.quiet summary:focus-visible {
+    outline: 2px solid var(--pico-primary);
+    outline-offset: 2px;
+}
+
+/* Full contrast while the hint is being read or used. */
+.card-notice.quiet:has(details[open]),
+.card-notice.quiet:focus-within {
+    opacity: 1;
+}
+
 .card-notice-detail {
     margin-top: 0.25rem;
 }

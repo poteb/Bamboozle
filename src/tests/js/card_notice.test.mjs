@@ -52,7 +52,7 @@ test('Developer Mode off is a quiet hint naming the print controls', () => {
     assert.match(n.text, /may be ignored/);
     // A fact, not a claim that every command is refused: the light works.
     assert.doesNotMatch(n.text, /refusing/i);
-    // How to fix it is in the tooltip.
+    // How to fix it is in the hint's detail body.
     assert.match(n.title, /LAN Only \+ Developer Mode/);
     assert.match(n.title, /restart/);
     assert.match(n.title, /access code/i);
@@ -99,11 +99,11 @@ test('a silence reason left over on an online printer is not shown', () => {
 test('a quiet hint puts the fix in a details body, not only a tooltip', () => {
     const html = app.noticeHtml(app.cardNotice(printer({ developer_mode: false })));
     assert.match(html, /^<details><summary>Developer Mode off: [^<]*<\/summary>/);
-    assert.match(html, /<div class="card-notice-detail">[^<]*LAN Only \+ Developer Mode[^<]*<\/div><\/details>$/);
+    assert.match(html, /<div class="card-notice-detail" aria-live="off">[^<]*LAN Only \+ Developer Mode[^<]*<\/div><\/details>$/);
 });
 
 test('a warning notice is plain escaped text', () => {
-    assert.equal(app.noticeHtml({ text: 'a <b> & c', title: 't' }), 'a &lt;b&gt; &amp; c');
+    assert.equal(app.noticeHtml({ text: 'a <b> & "c"', title: 't' }), 'a &lt;b&gt; &amp; &quot;c&quot;');
     assert.equal(app.noticeHtml(null), '');
 });
 

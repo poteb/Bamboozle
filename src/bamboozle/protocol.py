@@ -13,7 +13,7 @@ from urllib.parse import unquote
 # Developer Mode is off. That does NOT mean every command is dropped: the
 # user's H2C and P2S report it, yet the chamber light toggles from us work.
 # Which commands the firmware gates is unconfirmed, so it's only a hint
-# (print controls may be refused) and never fails a command.
+# (print controls may be ignored) and never fails a command.
 DEV_MODE_OFF_BIT = 0x20000000
 
 # CONNACK reason codes for a refused login (MQTT 3.1.1 return codes 4 and 5,

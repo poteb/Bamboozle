@@ -65,7 +65,7 @@ class PrinterState(BaseModel):
     filaments: list[Filament] = []
     error_code: int = 0
     # None when the printer doesn't report it (A1 / P1 send no `fun` field).
-    # Informational only: some print controls may be refused while it's off
+    # Informational only: some print controls may be ignored while it's off
     # (see protocol.py); commands are never failed because of it.
     developer_mode: bool | None = None
     # Why the connection is down, when known (protocol.AUTH_REJECTED,
