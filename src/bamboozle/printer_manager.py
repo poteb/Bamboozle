@@ -56,7 +56,7 @@ class PrinterConnection:
         self._backoff = self.INITIAL_BACKOFF_SECONDS
         self._retry_at = 0.0  # monotonic time the next reconnect is due
         self._connected = False
-        self._connected_at = 0.0
+        self._last_seen_up = 0.0  # monotonic time MQTT was last seen connected
         self._connecting = False
 
     @property
@@ -84,8 +84,7 @@ class PrinterConnection:
             )
             await asyncio.sleep(self.MQTT_SETTLE_SECONDS)
             self._connected = True
-            self._connected_at = time.monotonic()
-            self._backoff = self.INITIAL_BACKOFF_SECONDS
+            self._last_seen_up = time.monotonic()  # grace starts now
             logger.info("Connected to printer %s (%s)", self.cfg.name, self.cfg.ip)
             return True
         except asyncio.TimeoutError:
@@ -121,8 +120,9 @@ class PrinterConnection:
     def is_offline(self) -> bool:
         """True when the printer is known to be down at its saved IP.
 
-        A connect in progress, or a freshly started session still within its
-        grace period, does not count as offline yet.
+        A connect in progress, or a session that was up (or started) within
+        the grace period, does not count as offline yet - paho may still be
+        handshaking or reconnecting by itself.
         """
         if self._connecting:
             return False
@@ -130,10 +130,12 @@ class PrinterConnection:
             return True
         try:
             if self.printer.mqtt_client.is_connected():
+                self._last_seen_up = time.monotonic()
+                self._backoff = self.INITIAL_BACKOFF_SECONDS  # session verified
                 return False
         except Exception:
             pass
-        return time.monotonic() - self._connected_at > self.MQTT_GRACE_SECONDS
+        return time.monotonic() - self._last_seen_up > self.MQTT_GRACE_SECONDS
 
     async def reset_session(self) -> None:
         """Stop a dead MQTT session so the next reconnect re-probes the IP."""
@@ -141,7 +143,7 @@ class PrinterConnection:
             await asyncio.to_thread(self.printer.mqtt_stop)
         except Exception as e:
             logger.debug("Error stopping MQTT for %s: %s", self.cfg.name, e)
-        self._connected = False
+        self._schedule_retry()
 
     async def read_state(self) -> PrinterState:
         if not self._connected:
@@ -578,16 +580,16 @@ class PrinterManager:
         if self._listener:
             self._listener.stop()
             self._listener = None
-        tasks = list(self._tasks)
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        if self._poll_task:
+        if self._poll_task:  # first, so it can't spawn more reconnects
             self._poll_task.cancel()
             try:
                 await self._poll_task
             except asyncio.CancelledError:
                 pass
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         for conn in self._connections.values():
             await conn.disconnect()
         logger.info("PrinterManager stopped")
@@ -663,7 +665,9 @@ class PrinterManager:
     # --- IP auto-detect -----------------------------------------------------
 
     def _on_announcement(self, ann: discovery.Announcement) -> None:
-        self._spawn(self.handle_announcement(ann))
+        serial = ann.serial.upper()
+        if any(c.cfg.serial.upper() == serial for c in self._connections.values()):
+            self._spawn(self.handle_announcement(ann))
 
     async def handle_announcement(self, ann: discovery.Announcement) -> None:
         """Follow a configured printer to the IP it just announced.
@@ -691,7 +695,12 @@ class PrinterManager:
                 discovery.fetch_cert_common_name, ann.ip, discovery.MQTT_PORT
             )
             if (cn or "").upper() != serial:
-                self._rejected[key] = time.monotonic()
+                now = time.monotonic()
+                self._rejected = {
+                    k: t for k, t in self._rejected.items()
+                    if now - t < self.RELOCATE_RETRY_SECONDS
+                }
+                self._rejected[key] = now
                 logger.warning(
                     "%s announced at %s but its certificate CN is %r, not %s; ignoring",
                     conn.cfg.name, ann.ip, cn, conn.cfg.serial,

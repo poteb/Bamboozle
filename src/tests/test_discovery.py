@@ -49,3 +49,9 @@ def test_rejects_non_ip_location_and_junk():
     assert parse_announcement(
         b"NOTIFY * HTTP/1.1\r\nLocation: 192.168.0.5\r\nUSN: ../../etc\r\n\r\n"
     ) is None
+
+
+def test_rejects_public_location():
+    assert parse_announcement(
+        b"NOTIFY * HTTP/1.1\r\nLocation: 8.8.8.8\r\nUSN: 01P00C511100150\r\n\r\n"
+    ) is None

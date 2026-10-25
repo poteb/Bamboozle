@@ -7,10 +7,11 @@ import pytest
 
 from bamboozle.discovery import SsdpListener
 
-PACKET = (
-    b"NOTIFY * HTTP/1.1\r\nLocation: 192.168.0.102\r\nUSN: 03919D533005771\r\n"
-    b"DevModel.bambu.com: N2S\r\nDevName.bambu.com: A1\r\n\r\n"
-)
+def _packet(location: str) -> bytes:
+    return (
+        f"NOTIFY * HTTP/1.1\r\nLocation: {location}\r\nUSN: 03919D533005771\r\n"
+        "DevModel.bambu.com: N2S\r\nDevName.bambu.com: A1\r\n\r\n"
+    ).encode()
 
 
 def test_delivers_parsed_announcements():
@@ -20,7 +21,9 @@ def test_delivers_parsed_announcements():
         assert await listener.start() is True
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as tx:
             tx.sendto(b"not an announcement", ("127.0.0.1", listener.port))
-            tx.sendto(PACKET, ("127.0.0.1", listener.port))
+            # Location must match the sender, or the packet is dropped.
+            tx.sendto(_packet("192.168.0.102"), ("127.0.0.1", listener.port))
+            tx.sendto(_packet("127.0.0.1"), ("127.0.0.1", listener.port))
         for _ in range(50):
             if received:
                 break
@@ -30,7 +33,7 @@ def test_delivers_parsed_announcements():
 
     received = asyncio.run(scenario())
     assert [(a.ip, a.serial, a.name) for a in received] == [
-        ("192.168.0.102", "03919D533005771", "A1")]
+        ("127.0.0.1", "03919D533005771", "A1")]
 
 
 def test_shares_port_with_another_reuseaddr_listener():

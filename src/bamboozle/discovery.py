@@ -48,9 +48,12 @@ def parse_announcement(data: bytes) -> Announcement | None:
     if not _SERIAL_RE.match(serial):
         return None
     try:
-        ip = str(ipaddress.ip_address(location))
+        addr = ipaddress.ip_address(location)
     except ValueError:
         return None
+    if not addr.is_private:  # printers live on the LAN
+        return None
+    ip = str(addr)
     return Announcement(
         ip=ip,
         serial=serial,
@@ -163,6 +166,9 @@ class _SsdpProtocol(asyncio.DatagramProtocol):
     def datagram_received(self, data: bytes, addr) -> None:
         ann = parse_announcement(data)
         if ann is None:
+            return
+        if addr[0] != ann.ip:  # Location must be the sender itself
+            logger.debug("Ignoring announcement for %s sent from %s", ann.ip, addr[0])
             return
         try:
             self._on_announcement(ann)
