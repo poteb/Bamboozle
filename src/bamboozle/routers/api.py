@@ -13,7 +13,7 @@ from ..models import PrinterAddRequest, PrinterConfig, PrinterState, PrinterUpda
 router = APIRouter()
 
 # POST /printers/test: how long to wait for the login answer, then for the
-# first report (the library asks for a pushall as soon as it's logged in).
+# first report and (separately) the full status.
 TEST_CONNACK_TIMEOUT = 10.0
 TEST_REPORT_TIMEOUT = 5.0
 
@@ -176,16 +176,26 @@ async def test_connection(body: PrinterAddRequest) -> dict:
         return {"success": False, "message": f"printer unreachable at {body.ip}"}
 
     printer = bl.Printer(body.ip, body.access_code, body.serial)
+    mqtt_client = printer.mqtt_client
     connack: list = []
     got_connack = threading.Event()
-    got_report = threading.Event()
+    got_report = threading.Event()  # anything on the serial's report topic
+    got_status = threading.Event()  # a report carrying gcode_state
 
     def on_connect(_mqtt, _client, _userdata, _flags, rc, _props):
         connack.append(rc)
         got_connack.set()
 
-    printer.mqtt_client.on_connect_handler = on_connect
-    printer.mqtt_client.on_message_handler = lambda *_: got_report.set()
+    def gcode_state() -> str | None:
+        return (mqtt_client.dump().get("print") or {}).get("gcode_state")
+
+    def on_message(*_):
+        got_report.set()
+        if gcode_state():
+            got_status.set()
+
+    mqtt_client.on_connect_handler = on_connect
+    mqtt_client.on_message_handler = on_message
     try:
         await asyncio.to_thread(printer.mqtt_start)
         if not await asyncio.to_thread(got_connack.wait, TEST_CONNACK_TIMEOUT):
@@ -199,10 +209,16 @@ async def test_connection(body: PrinterAddRequest) -> dict:
         if not await asyncio.to_thread(got_report.wait, TEST_REPORT_TIMEOUT):
             return {"success": False,
                     "message": "Connected, but the printer sent no data: check the serial number"}
-        state = await asyncio.to_thread(printer.get_state)
+        if not got_status.is_set():
+            # A1 / P1S ignore the library's combined on-connect request, so
+            # ask for the full status on its own.
+            await asyncio.to_thread(mqtt_client.pushall)
+            await asyncio.to_thread(got_status.wait, TEST_REPORT_TIMEOUT)
+        state = gcode_state()
         return {
             "success": True,
-            "message": f"Connected successfully. State: {state}",
+            "message": f"Connected successfully. State: {state}" if state
+            else "Connected successfully",
         }
     except Exception as e:
         return {"success": False, "message": str(e)}

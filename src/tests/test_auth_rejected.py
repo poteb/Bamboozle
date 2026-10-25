@@ -99,6 +99,62 @@ def test_late_refusal_counts_as_offline_without_waiting_for_the_grace(lan, monke
     assert asyncio.run(scenario()) is True
 
 
+def test_other_refusal_keeps_the_access_code_error(lan, monkeypatch):
+    monkeypatch.setattr(bl.Printer, "mqtt_start", lambda self: connack(self, BAD_PASSWORD))
+    conn = _conn()
+
+    async def scenario():
+        await conn.connect()
+        connack(conn.printer, UNAVAILABLE)
+        return await conn.read_state()
+
+    assert asyncio.run(scenario()).last_error == protocol.AUTH_REJECTED
+
+
+def test_retry_does_not_act_on_the_previous_attempts_refusal(lan, monkeypatch):
+    """A slow CONNACK on the retry must not be cut short by the old refusal."""
+    answers = [BAD_PASSWORD, None]  # retry: no CONNACK within the settle time
+    stops = []
+
+    def start(self):
+        rc = answers.pop(0)
+        if rc is not None:
+            connack(self, rc)
+
+    monkeypatch.setattr(bl.Printer, "mqtt_start", start)
+    monkeypatch.setattr(bl.Printer, "mqtt_stop", lambda self: stops.append(1))
+    monkeypatch.setattr(PrinterConnection, "MQTT_GRACE_SECONDS", 60)
+    conn = _conn()
+
+    async def scenario():
+        assert await conn.connect() is False
+        assert len(stops) == 1
+        ok = await conn.connect()
+        return ok, conn.is_offline(), await conn.read_state()
+
+    ok, offline, state = asyncio.run(scenario())
+    assert ok is True
+    assert len(stops) == 1          # the retry's session was left to finish its login
+    assert offline is False         # ...and isn't torn down by the poll loop either
+    assert state.last_error == protocol.AUTH_REJECTED  # still the last thing we know
+
+
+def test_unreachable_printer_drops_the_access_code_error(lan, monkeypatch):
+    """Switched off after a refusal: we know nothing about the code any more."""
+    monkeypatch.setattr(bl.Printer, "mqtt_start", lambda self: connack(self, BAD_PASSWORD))
+    conn = _conn()
+
+    async def scenario():
+        await conn.connect()
+        monkeypatch.setattr(discovery, "tcp_reachable", lambda ip, port=8883, timeout=3.0: False)
+        await conn.connect()
+        return await conn.read_state()
+
+    state = asyncio.run(scenario())
+    assert state.online is False
+    assert state.last_error == ""
+
+
 def test_accepted_login_clears_the_error(lan, monkeypatch):
     monkeypatch.setattr(bl.Printer, "mqtt_start", lambda self: connack(self, BAD_PASSWORD))
     conn = _conn()
@@ -155,6 +211,35 @@ def test_api_test_reports_no_data(quick_test_endpoint, monkeypatch):
     result = asyncio.run(api_test_connection(_body()))
     assert result["success"] is False
     assert "serial" in result["message"]
+
+
+def _answer_only_the_version_request(self):
+    """A1 / P1S: the library's combined on-connect request gets no full status."""
+    connack(self, SUCCESS)
+    mc = self.mqtt_client
+    mc.manual_update({"info": {"command": "get_version", "module": []}})
+    mc.on_message_handler(mc, None, None, None)
+
+
+def test_api_test_asks_for_a_pushall_when_no_status_came(quick_test_endpoint, monkeypatch):
+    monkeypatch.setattr(bl.Printer, "mqtt_start", _answer_only_the_version_request)
+
+    def pushall(mc):
+        mc.manual_update({"print": {"gcode_state": "RUNNING"}})
+        mc.on_message_handler(mc, None, None, None)
+        return True
+
+    monkeypatch.setattr(bl.PrinterMQTTClient, "pushall", pushall)
+    result = asyncio.run(api_test_connection(_body()))
+    assert result == {"success": True, "message": "Connected successfully. State: RUNNING"}
+
+
+def test_api_test_succeeds_without_a_status(quick_test_endpoint, monkeypatch):
+    """Reports on the serial's topic prove the login and serial; state is a bonus."""
+    monkeypatch.setattr(bl.Printer, "mqtt_start", _answer_only_the_version_request)
+    monkeypatch.setattr(bl.PrinterMQTTClient, "pushall", lambda mc: True)
+    result = asyncio.run(api_test_connection(_body()))
+    assert result == {"success": True, "message": "Connected successfully"}
 
 
 def test_api_test_success(quick_test_endpoint, monkeypatch, caplog):

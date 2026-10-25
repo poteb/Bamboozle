@@ -764,9 +764,9 @@ class BamboozleApp {
     cardNotice(s) {
         if (!s.online && s.last_error === 'auth_rejected') {
             return {
-                text: 'Access code wrong or changed: update it in Settings',
-                title: 'The printer refused the login. Its access code changes whenever '
-                    + 'LAN Only or Developer Mode is toggled on the printer.',
+                text: 'Access code wrong or changed (toggling LAN Only or Developer Mode '
+                    + 'changes it): update it in Settings',
+                title: 'The printer refused the login.',
             };
         }
         if (s.online && s.commands_blocked) {

@@ -41,6 +41,11 @@ def test_developer_mode_off_blocks_commands():
     assert protocol.commands_blocked({"fun": H2C_FUN, "hms": []}) is True
 
 
+def test_live_developer_mode_bit_beats_a_leftover_hms():
+    """The HMS records a past refusal; `fun` is the current state."""
+    assert protocol.commands_blocked({"fun": "14023FF18FFF9CB7", "hms": [VERIFY_FAILED]}) is False
+
+
 @pytest.mark.parametrize("payload", [
     {},                                             # nothing received yet
     {"hms": []},                                    # A1 / P1S: no fun, no HMS

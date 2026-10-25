@@ -72,18 +72,23 @@ def hms_codes(print_payload: dict) -> set[str]:
 
 
 def commands_blocked(print_payload: dict) -> bool:
-    """True when the printer is known to refuse control commands."""
-    return (
-        developer_mode(print_payload) is False
-        or COMMAND_VERIFY_FAILED_HMS in hms_codes(print_payload)
-    )
+    """True when the printer is known to refuse control commands.
+
+    `fun` is the live state, so it wins where reported. The HMS only records
+    that a command was refused and can outlive turning Developer Mode on;
+    it's the only evidence on printers without `fun`.
+    """
+    dev_mode = developer_mode(print_payload)
+    if dev_mode is not None:
+        return not dev_mode
+    return COMMAND_VERIFY_FAILED_HMS in hms_codes(print_payload)
 
 
 def connack_failed(reason_code: Any) -> bool:
-    """True when a CONNACK (paho ReasonCode or int) refused the connection."""
+    """True when a CONNACK (paho ReasonCode, or its int value) refused us."""
     return getattr(reason_code, "is_failure", reason_code != 0)
 
 
 def is_auth_refusal(reason_code: Any) -> bool:
-    """True for a CONNACK refusing our credentials (paho ReasonCode or int)."""
+    """True for a CONNACK refusing our credentials (ReasonCode, or 134 / 135)."""
     return getattr(reason_code, "value", reason_code) in _AUTH_REFUSAL_CODES

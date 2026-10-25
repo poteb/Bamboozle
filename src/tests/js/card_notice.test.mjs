@@ -43,6 +43,8 @@ test('a refused access code says so, and where to fix it', () => {
     const n = app.cardNotice(printer({ online: false, last_error: 'auth_rejected' }));
     assert.match(n.text, /access code wrong or changed/i);
     assert.match(n.text, /Settings/);
+    // Why it changed is visible too, not only in a hover tooltip.
+    assert.match(n.text, /LAN Only|Developer Mode/);
 });
 
 test('a stale commands_blocked flag is not shown while the printer is offline', () => {

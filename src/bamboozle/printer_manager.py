@@ -59,11 +59,15 @@ class PrinterConnection:
         self._last_seen_up = 0.0  # monotonic time MQTT was last seen connected
         self._connecting = False
         # Set from paho's thread on every CONNACK; kept across reconnects
-        # until a login is accepted.
+        # until a login is accepted (or the printer stops answering at all).
         self._auth_rejected = False
+        # Whether the current connect attempt has had its CONNACK yet, so a
+        # retry doesn't act on the previous attempt's refusal.
+        self._login_answered = False
         self.printer.mqtt_client.on_connect_handler = self._on_mqtt_connack
 
     def _on_mqtt_connack(self, _mqtt, _client, _userdata, _flags, rc, _props) -> None:
+        self._login_answered = True
         if protocol.is_auth_refusal(rc):
             if not self._auth_rejected:
                 logger.warning(
@@ -94,15 +98,17 @@ class PrinterConnection:
         )
         if not reachable:
             logger.warning("%s: printer unreachable at %s", self.cfg.name, self.cfg.ip)
+            self._auth_rejected = False  # says nothing about the code any more
             self._schedule_retry()
             return False
+        self._login_answered = False
         try:
             await asyncio.wait_for(
                 asyncio.to_thread(self.printer.mqtt_start), timeout=10
             )
             await asyncio.sleep(self.MQTT_SETTLE_SECONDS)
             self._connected = True
-            if self._auth_rejected:
+            if self._login_refused():
                 # paho would keep retrying the bad code every few seconds;
                 # stop it and retry on our own (backed-off) schedule instead.
                 logger.error(
@@ -153,7 +159,7 @@ class PrinterConnection:
         """
         if self._connecting:
             return False
-        if not self._connected or self._auth_rejected:
+        if not self._connected or self._login_refused():
             return True  # a refused code won't fix itself; don't wait out the grace
         try:
             if self.printer.mqtt_client.is_connected():
@@ -163,6 +169,10 @@ class PrinterConnection:
         except Exception:
             pass
         return time.monotonic() - self._last_seen_up > self.MQTT_GRACE_SECONDS
+
+    def _login_refused(self) -> bool:
+        """The current attempt's login was refused (not just a previous one)."""
+        return self._login_answered and self._auth_rejected
 
     async def reset_session(self) -> None:
         """Stop a dead MQTT session so the next reconnect re-probes the IP."""
