@@ -9,6 +9,7 @@ import struct
 import subprocess
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Iterator
 
 logger = logging.getLogger(__name__)
@@ -117,18 +118,18 @@ def rtsp_command(ffmpeg: str, url: str) -> list[str]:
 class _FreezeWatch:
     """Tracks when an ffmpeg session last delivered a picture different from the one before.
 
-    `still` is the picture the previous ffmpeg froze on. If a fresh ffmpeg
+    `frozen_on` is the picture the previous ffmpeg froze on. If a fresh ffmpeg
     shows exactly that picture, the scene is still rather than the stream
     dead, so the long timeout applies until the picture changes.
     """
 
-    def __init__(self, frozen_after: float, still_after: float, still: bytes | None):
+    def __init__(self, frozen_after: float, still_after: float, frozen_on: bytes | None):
         self._frozen_after = frozen_after
         self._still_after = still_after
-        self.still = still
+        self.frozen_on = frozen_on
         self.timeout = frozen_after
         self.last: bytes | None = None
-        self.fired = False
+        self.tripped = False
         self._changed_at = time.monotonic()
 
     def feed(self, frame: bytes) -> None:
@@ -136,18 +137,18 @@ class _FreezeWatch:
             return
         self.last = frame
         self._changed_at = time.monotonic()
-        if self.still is not None and frame == self.still:
+        if self.frozen_on is not None and frame == self.frozen_on:
             self.timeout = self._still_after
         else:
-            self.still = None
+            self.frozen_on = None
             self.timeout = self._frozen_after
 
     def frozen(self) -> bool:
         return time.monotonic() - self._changed_at > self.timeout
 
-    def fire(self) -> None:
-        self.fired = True
-        self.still = self.last
+    def trip(self) -> None:
+        self.tripped = True
+        self.frozen_on = self.last
 
 
 class CameraStream:
@@ -158,21 +159,24 @@ class CameraStream:
     - RTSP over TLS (port 322): X1, X1C, H2C, H2D, P2 series
 
     Sessions drop routinely (an X1/P2 RTSP session often lasts about a
-    minute). A session that delivered frames is respawned after
-    RESPAWN_DELAY, with the last frame kept on screen. Sessions that deliver
-    nothing back off exponentially from BACKOFF_START to BACKOFF_MAX.
+    minute). A healthy session (frames for at least HEALTHY_SESSION_SECONDS)
+    is respawned after RESPAWN_SECONDS, with the last frame kept on screen.
+    Other sessions back off exponentially from BACKOFF_MIN_SECONDS to
+    BACKOFF_MAX_SECONDS, so a printer that drops us right after a frame isn't
+    hammered. A session that delivered no frames also clears the picture.
     """
 
-    RESPAWN_DELAY = 0.5
-    BACKOFF_START = 3.0
-    BACKOFF_MAX = 60.0
+    HEALTHY_SESSION_SECONDS = 10.0
+    RESPAWN_SECONDS = 0.5
+    BACKOFF_MIN_SECONDS = 3.0
+    BACKOFF_MAX_SECONDS = 60.0
     # A frame this old is not served, so a dead stream shows "connecting".
-    FRAME_MAX_AGE = 20.0
+    FRAME_MAX_AGE_SECONDS = 20.0
     # ffmpeg is restarted when the picture hasn't changed for this long.
     # A dead upstream can leave it repeating its last frame indefinitely.
     FROZEN_SECONDS = 20.0
     STILL_SCENE_SECONDS = 300.0
-    WATCH_INTERVAL = 1.0
+    WATCH_INTERVAL_SECONDS = 1.0
     FFMPEG_STARTUP_SECONDS = 1.0
 
     def __init__(self, ip: str, access_code: str, camera_port: int = 6000):
@@ -186,8 +190,9 @@ class CameraStream:
         self._stopped = threading.Event()
         self._thread: threading.Thread | None = None
         self._proc: subprocess.Popen | None = None
+        self._sock: socket.socket | None = None
         self._session_frames = 0
-        self._still_frame: bytes | None = None
+        self._frozen_on: bytes | None = None
 
     @property
     def available(self) -> bool:
@@ -195,6 +200,11 @@ class CameraStream:
 
     def start(self) -> None:
         if self._running:
+            return
+        if self._thread is not None and self._thread.is_alive():
+            # A capture thread that didn't stop in time; a second one would
+            # fight it for a camera that often accepts only one client.
+            logger.warning("Camera for %s is still stopping, not starting", self._ip)
             return
         self._running = True
         self._stopped.clear()
@@ -208,17 +218,25 @@ class CameraStream:
         proc = self._proc
         if proc is not None:
             _kill(proc)
+        sock = self._sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            sock.close()
         if self._thread:
             self._thread.join(timeout=10)
-            self._thread = None
+            if not self._thread.is_alive():
+                self._thread = None
         with self._lock:
             self._frame = None
-        self._still_frame = None
+        self._frozen_on = None
         logger.info("Camera stream stopped for %s", self._ip)
 
     def get_frame(self) -> bytes | None:
         with self._lock:
-            if self._frame is None or time.monotonic() - self._frame_at > self.FRAME_MAX_AGE:
+            if self._frame is None or time.monotonic() - self._frame_at > self.FRAME_MAX_AGE_SECONDS:
                 return None
             return self._frame
 
@@ -232,24 +250,28 @@ class CameraStream:
         self._stopped.wait(seconds)
 
     def _capture_loop(self) -> None:
-        backoff = self.BACKOFF_START
+        backoff = self.BACKOFF_MIN_SECONDS
         while self._running:
             self._session_frames = 0
+            started = time.monotonic()
             try:
                 self._capture_session()
             except Exception as e:
-                logger.error("Camera error for %s:%d: %s", self._ip, self._port, e)
+                if self._running:  # not just stop() closing the socket
+                    logger.error("Camera error for %s:%d: %s", self._ip, self._port, e)
             if not self._running:
                 break
 
-            if self._session_frames:
-                backoff = self.BACKOFF_START
-                delay = self.RESPAWN_DELAY
+            lasted = time.monotonic() - started
+            if self._session_frames and lasted >= self.HEALTHY_SESSION_SECONDS:
+                backoff = self.BACKOFF_MIN_SECONDS
+                delay = self.RESPAWN_SECONDS
             else:
-                with self._lock:
-                    self._frame = None
+                if not self._session_frames:
+                    with self._lock:
+                        self._frame = None
                 delay = backoff
-                backoff = min(backoff * 2, self.BACKOFF_MAX)
+                backoff = min(backoff * 2, self.BACKOFF_MAX_SECONDS)
             logger.info("Camera reconnecting to %s in %.1fs", self._ip, delay)
             self._wait(delay)
 
@@ -271,38 +293,35 @@ class CameraStream:
         with socket.create_connection((self._ip, self._port), timeout=10) as sock:
             # Enable TCP keepalive to detect dead connections
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            ssl_sock = ctx.wrap_socket(sock, server_hostname=self._ip)
-            ssl_sock.write(auth_data)
-            ssl_sock.settimeout(60.0)
+            with ctx.wrap_socket(sock, server_hostname=self._ip) as ssl_sock:
+                self._sock = ssl_sock
+                try:
+                    self._read_raw_socket(ssl_sock, auth_data)
+                finally:
+                    self._sock = None
 
-            # There is no separate auth reply: the first 16 bytes are the
-            # first frame's header.
-            read_buf = bytearray(self._sock_read(ssl_sock, RAW_HEADER_SIZE))
-            if len(read_buf) < RAW_HEADER_SIZE:
-                raise ConnectionError(f"Bad auth response: {len(read_buf)} bytes")
+    def _read_raw_socket(self, ssl_sock: ssl.SSLSocket, auth_data: bytes) -> None:
+        ssl_sock.sendall(auth_data)
+        ssl_sock.settimeout(60.0)
+        # There is no separate auth reply: the first 16 bytes are the
+        # first frame's header.
+        read_buf = bytearray()
+        try:
+            _fill(ssl_sock.recv, read_buf, RAW_HEADER_SIZE)
+        except ConnectionError:
+            raise ConnectionError(f"Bad auth response: {len(read_buf)} bytes") from None
 
-            # Check for 24-byte newer protocol response
-            if read_buf[4:8] == b"\x3f\x01\x03\x00":
-                raise ConnectionError(
-                    "Printer uses RTSP protocol. Set camera port to 322."
-                )
+        # Check for 24-byte newer protocol response
+        if read_buf[4:8] == b"\x3f\x01\x03\x00":
+            raise ConnectionError(
+                "Printer uses RTSP protocol. Set camera port to 322."
+            )
 
-            logger.info("Camera connected to %s via raw socket", self._ip)
-            for frame in raw_frames(ssl_sock.recv, read_buf):
-                if not self._running:
-                    break
-                self._publish(frame)
-
-    @staticmethod
-    def _sock_read(sock: ssl.SSLSocket, n: int) -> bytes:
-        """Read at least n bytes from socket."""
-        buf = b""
-        while len(buf) < n:
-            chunk = sock.recv(n - len(buf))
-            if not chunk:
-                return buf
-            buf += chunk
-        return buf
+        logger.info("Camera connected to %s via raw socket", self._ip)
+        for frame in raw_frames(ssl_sock.recv, read_buf):
+            if not self._running:
+                break
+            self._publish(frame)
 
     def _build_auth_packet(self) -> bytearray:
         auth = bytearray()
@@ -340,16 +359,25 @@ class CameraStream:
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
         self._proc = proc
+        # Drain stderr as it comes: a full pipe would block ffmpeg, which the
+        # watchdog would then mistake for a frozen camera.
+        stderr_tail: deque[bytes] = deque(maxlen=20)
+        drain = threading.Thread(target=_drain, args=(proc.stderr, stderr_tail), daemon=True)
+        drain.start()
+
+        def stderr_text() -> str:
+            drain.join(timeout=1)
+            return b"".join(stderr_tail).decode(errors="replace").strip()[-300:]
+
         watch: _FreezeWatch | None = None
         try:
             if self._stopped.wait(self.FFMPEG_STARTUP_SECONDS):
                 return
             if proc.poll() is not None:
-                stderr = proc.stderr.read().decode(errors="replace").strip()
-                raise ConnectionError(f"ffmpeg exited: {stderr[:300]}")
+                raise ConnectionError(f"ffmpeg exited: {stderr_text()}")
 
             logger.info("Camera connected to %s via ffmpeg RTSP", self._ip)
-            watch = _FreezeWatch(self.FROZEN_SECONDS, self.STILL_SCENE_SECONDS, self._still_frame)
+            watch = _FreezeWatch(self.FROZEN_SECONDS, self.STILL_SCENE_SECONDS, self._frozen_on)
             threading.Thread(target=self._watch_ffmpeg, args=(proc, watch), daemon=True).start()
 
             for frame in jpeg_frames(proc.stdout.read):
@@ -358,20 +386,21 @@ class CameraStream:
                 watch.feed(frame)
                 self._publish(frame)
 
-            if proc.poll() is not None and proc.returncode != 0 and not watch.fired:
-                stderr = proc.stderr.read().decode(errors="replace").strip()
+            if proc.poll() is not None and proc.returncode != 0 and not watch.tripped:
+                stderr = stderr_text()
                 if stderr:
-                    logger.error("ffmpeg error for %s: %s", self._ip, stderr[:300])
+                    logger.error("ffmpeg error for %s: %s", self._ip, stderr)
         finally:
             self._proc = None
             if watch is not None:
-                self._still_frame = watch.still
+                self._frozen_on = watch.frozen_on
             if proc.poll() is None:
                 proc.terminate()
                 try:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     proc.kill()
+            proc.stdout.close()
 
     def _watch_ffmpeg(self, proc: subprocess.Popen, watch: _FreezeWatch) -> None:
         """Kill ffmpeg when the picture stops changing. The capture loop respawns it."""
@@ -380,10 +409,17 @@ class CameraStream:
                 logger.warning(
                     "Camera %s: no new frame for %.0fs, restarting ffmpeg", self._ip, watch.timeout
                 )
-                watch.fire()
+                watch.trip()
                 _kill(proc)
                 return
-            self._stopped.wait(self.WATCH_INTERVAL)
+            self._stopped.wait(self.WATCH_INTERVAL_SECONDS)
+
+
+def _drain(pipe, tail: deque[bytes]) -> None:
+    """Read a pipe to EOF, keeping only its last lines."""
+    with pipe:
+        for line in iter(pipe.readline, b""):
+            tail.append(line)
 
 
 def _kill(proc: subprocess.Popen) -> None:
