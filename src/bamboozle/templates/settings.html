@@ -17,7 +17,10 @@
             {% for p in printers %}
             <li data-name="{{ p.name }}">
                 <button type="button" class="printer-link" data-id="{{ p.id }}"
-                    onclick="editPrinter('{{ p.id }}', '{{ p.name }}', '{{ p.ip }}', '{{ p.access_code }}', '{{ p.serial }}', {{ p.camera_port }}, {{ 'true' if p.camera_enabled else 'false' }}, {{ p.sort }})">
+                    data-name="{{ p.name }}" data-ip="{{ p.ip }}" data-code="{{ p.access_code }}"
+                    data-serial="{{ p.serial }}" data-camera-port="{{ p.camera_port }}"
+                    data-camera-enabled="{{ 'true' if p.camera_enabled else 'false' }}" data-sort="{{ p.sort }}"
+                    onclick="editPrinterFromLink(this)">
                     {{ p.name }}
                 </button>
             </li>
@@ -59,6 +62,11 @@
             </div>
             <fieldset class="form-col form-col-right connection-group">
                 <legend>Connection</legend>
+                <div id="discovery" class="discovery" hidden>
+                    <small class="discovery-title">Discovered on network</small>
+                    <ul id="discovery-list" class="discovery-list"></ul>
+                    <p id="discovery-note" class="discovery-note"></p>
+                </div>
                 <label>
                     IP Address
                     <input type="text" id="printer-ip" placeholder="e.g. 192.168.1.50" required>
@@ -172,6 +180,15 @@ function newPrinter() {
     }
     setSelectedSidebarItem(null);
     showForm();
+    startDiscovery();
+}
+
+// Printer fields travel in data-* attributes, never inline JS: names can come
+// from network announcements.
+function editPrinterFromLink(el) {
+    const d = el.dataset;
+    editPrinter(d.id, d.name, d.ip, d.code, d.serial, d.cameraPort,
+        d.cameraEnabled === 'true', parseInt(d.sort) || 0);
 }
 
 function editPrinter(id, name, ip, code, serial, cameraPort, cameraEnabled, sort) {
@@ -186,8 +203,91 @@ function editPrinter(id, name, ip, code, serial, cameraPort, cameraEnabled, sort
     document.getElementById('form-title').textContent = 'Edit Printer';
     document.getElementById('save-btn').textContent = 'Update Printer';
     document.getElementById('delete-btn').style.display = '';
+    stopDiscovery();
     setSelectedSidebarItem(id);
     showForm();
+}
+
+// --- Discover printers (Add form only) ---------------------------------
+const DISCOVERY_POLL_MS = 5000;
+let discoveryTimer = null;
+let discoveryPicked = null;  // serial of the picked row
+let discoveryGen = 0;        // drops responses that arrive after a stop
+
+function startDiscovery() {
+    stopDiscovery();
+    discoveryPicked = null;
+    document.getElementById('discovery-list').replaceChildren();
+    document.getElementById('discovery-note').textContent = 'Looking for printers…';
+    document.getElementById('discovery').hidden = false;
+    pollDiscovery();
+    discoveryTimer = setInterval(pollDiscovery, DISCOVERY_POLL_MS);
+}
+
+function stopDiscovery() {
+    if (discoveryTimer) clearInterval(discoveryTimer);
+    discoveryTimer = null;
+    discoveryGen++;
+    document.getElementById('discovery').hidden = true;
+}
+
+async function pollDiscovery() {
+    if (document.hidden) return;
+    const gen = discoveryGen;
+    try {
+        const res = await fetch('/api/discovery');
+        if (!res.ok) throw new Error(res.status);
+        const data = await res.json();
+        if (gen === discoveryGen) renderDiscovery(data);
+    } catch (err) {
+        if (gen === discoveryGen) {
+            document.getElementById('discovery-list').replaceChildren();
+            document.getElementById('discovery-note').textContent = 'Discovery unavailable. Enter details manually.';
+        }
+    }
+}
+
+function renderDiscovery(data) {
+    const list = document.getElementById('discovery-list');
+    const note = document.getElementById('discovery-note');
+    const printers = data.printers || [];
+    // Announcement fields come from the network: build with textContent only.
+    list.replaceChildren(...printers.map(p => {
+        const li = document.createElement('li');
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'discovery-item' + (p.serial.toUpperCase() === discoveryPicked ? ' selected' : '');
+        const name = document.createElement('strong');
+        name.textContent = p.name || p.serial;
+        const meta = document.createElement('span');
+        meta.textContent = [p.model_name, p.ip, p.serial].filter(Boolean).join(' · ');
+        btn.append(name, meta);
+        btn.addEventListener('click', () => pickDiscovered(p, btn));
+        li.append(btn);
+        return li;
+    }));
+    if (!data.listening) {
+        note.textContent = "Discovery unavailable: couldn't listen on UDP 2021 (another app may hold it). Enter details manually.";
+    } else if (printers.length === 0) {
+        note.textContent = 'Listening for printers… none found yet (printers announce every few seconds; make sure LAN mode is on).';
+    } else {
+        note.textContent = '';
+    }
+}
+
+function pickDiscovered(p, btn) {
+    document.getElementById('printer-ip').value = p.ip;
+    document.getElementById('printer-serial').value = p.serial;
+    if (p.camera_port != null) {
+        document.getElementById('printer-camera-port').value = String(p.camera_port);
+    }
+    const nameInput = document.getElementById('printer-name');
+    if (!nameInput.value.trim() && p.name) nameInput.value = p.name;
+    discoveryPicked = p.serial.toUpperCase();
+    document.querySelectorAll('#discovery-list .discovery-item').forEach(el => {
+        el.classList.toggle('selected', el === btn);
+    });
+    document.getElementById('printer-code').focus();
 }
 
 function deleteCurrentPrinter() {

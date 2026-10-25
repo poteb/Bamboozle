@@ -58,11 +58,13 @@ Before `mqtt_start`, `PrinterConnection.connect` (and `POST /api/printers/test`)
 
 **IP auto-detect** (`discovery.py`): `SsdpListener` passively listens on UDP 2021 (SO_REUSEADDR, shared with Bambu Studio; bind failure just disables the feature) for Bambu SSDP announcements (`Location` = IP, `USN` = serial). `PrinterManager.handle_announcement` matches on serial only (printers behind a repeater share one MAC), acts only when the printer isn't healthy at its saved IP, requires the TLS cert CN at the new IP to equal the serial (true for A1, P1S, H2C, P2S), then goes through `update_printer` and broadcasts `{"type": "notice"}` (shown as a toast).
 
+**Discover printers**: every announcement (configured or not) is also cached in memory on `PrinterManager` (keyed by upper-cased serial, latest wins, dropped after 5 min, capped at 64). `GET /api/discovery` returns `{"listening", "printers"}` with configured serials filtered out at request time; `discovery.model_info` maps `DevModel` codes to a friendly name + camera port (unknown → raw code, no port). The Settings Add form polls it every 5 s and a pick fills IP / serial / camera port (and Name if blank). The route sits outside `/printers/...` because `GET /printers/{printer_id}` would swallow it.
+
 **Commands** (pause/resume/stop/light/speed) go through `PrinterManager.execute_command` → `asyncio.to_thread(_run_command)` → `bambulabs_api` methods. The chamber light uses a hand-rolled `ledctrl` MQTT publish (`_set_light`) because it works across all models where the library helper doesn't.
 
 **Routers** (`bamboozle/routers/`):
 - `pages.py` — Jinja2-rendered HTML (`dashboard.html`, `settings.html`, `camera.html`, base layout).
-- `api.py` (mounted at `/api`) — REST CRUD for printers plus action endpoints; `POST /api/printers/test` does a throwaway MQTT connection without persisting.
+- `api.py` (mounted at `/api`) — REST CRUD for printers plus action endpoints; `POST /api/printers/test` does a throwaway MQTT connection without persisting. `GET /api/discovery` lists unconfigured printers heard on the LAN.
 - `ws.py` — WebSocket endpoint the dashboard subscribes to for push updates.
 - `stream.py` — MJPEG camera passthrough.
 

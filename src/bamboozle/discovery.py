@@ -21,6 +21,7 @@ SSDP_PORT = 2021
 MQTT_PORT = 8883
 
 _SERIAL_RE = re.compile(r"^[A-Za-z0-9]{6,32}$")
+_MAX_FIELD_LEN = 64  # DevName / DevModel are free text from the network
 
 
 @dataclass(frozen=True)
@@ -57,9 +58,37 @@ def parse_announcement(data: bytes) -> Announcement | None:
     return Announcement(
         ip=ip,
         serial=serial,
-        model=headers.get("devmodel.bambu.com", ""),
-        name=headers.get("devname.bambu.com", ""),
+        model=headers.get("devmodel.bambu.com", "")[:_MAX_FIELD_LEN],
+        name=headers.get("devname.bambu.com", "")[:_MAX_FIELD_LEN],
     )
+
+
+# --- Model codes -------------------------------------------------------------
+#
+# DevModel code -> (friendly name, camera port). C12, N2S, O1C2 and N7 are
+# confirmed from live printers; the rest come from Bambu Studio profiles.
+# Anything missing is treated as unknown.
+
+_MODELS: dict[str, tuple[str, int]] = {
+    "N1": ("A1 mini", 6000),
+    "N2S": ("A1", 6000),
+    "C11": ("P1P", 6000),
+    "C12": ("P1S", 6000),
+    "BL-P002": ("X1", 322),
+    "BL-P001": ("X1C", 322),
+    "C13": ("X1E", 322),
+    "O1C2": ("H2C", 322),
+    "O1D": ("H2D", 322),
+    "N7": ("P2S", 322),
+}
+
+
+def model_info(code: str) -> tuple[str, int | None]:
+    """Friendly model name and camera port for a DevModel code.
+
+    Unknown codes return the raw code and no port.
+    """
+    return _MODELS.get(code, (code, None))
 
 
 # --- TLS certificate check ------------------------------------------------
