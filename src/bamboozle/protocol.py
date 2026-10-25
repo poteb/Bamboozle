@@ -60,7 +60,10 @@ def developer_mode(print_payload: dict) -> bool | None:
 
 
 def hms_codes(print_payload: dict) -> set[str]:
-    """Full 16-hex-digit HMS codes (`AAAAAAAACCCCCCCC`) currently raised."""
+    """Full 16-hex-digit HMS codes (`AAAAAAAACCCCCCCC`) currently raised.
+
+    No caller yet: kept for the queued HMS decoding task.
+    """
     entries = print_payload.get("hms")
     if not isinstance(entries, list):
         return set()

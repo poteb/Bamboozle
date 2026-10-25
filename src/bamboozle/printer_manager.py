@@ -1177,8 +1177,8 @@ class PrinterManager:
         if not conn._connected:
             return False, "Printer not connected"
 
-        # The publish result alone decides. Developer Mode off is not proof
-        # that a command is dropped (the light works on such printers).
+        # The publish result alone decides; Developer Mode off never fails a
+        # command (see protocol.DEV_MODE_OFF_BIT).
         try:
             return await asyncio.to_thread(
                 self._run_command, conn.printer, action, params or {}

@@ -288,7 +288,8 @@
     font-size: 0.85rem;
 }
 
-/* Informational hint (e.g. Developer Mode off): no warning colours. */
+/* Informational hint (e.g. Developer Mode off): no warning colours; the
+   summary line opens a detail with the fix. */
 .card-notice.quiet:not(:empty) {
     margin-top: 0.35rem;
     padding: 0;
@@ -296,7 +297,33 @@
     background: none;
     font-size: 0.75rem;
     opacity: 0.65;
-    cursor: help;
+}
+
+.card-notice.quiet details {
+    margin: 0;
+}
+
+/* Undo Pico's accordion look: a plain disclosure marker before the text. */
+.card-notice.quiet summary,
+.card-notice.quiet details[open] > summary {
+    display: list-item;
+    list-style: disclosure-closed inside;
+    cursor: pointer;
+    color: inherit;
+    line-height: inherit;
+    margin: 0;
+}
+
+.card-notice.quiet details[open] > summary {
+    list-style-type: disclosure-open;
+}
+
+.card-notice.quiet summary::after {
+    display: none;
+}
+
+.card-notice-detail {
+    margin-top: 0.25rem;
 }
 
 /* File name */
