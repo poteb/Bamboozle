@@ -12,7 +12,7 @@ from typing import Any, Callable, NamedTuple
 
 from fastapi import WebSocket
 
-from . import commands, discovery, mqtt, protocol, snapshot, thumbnail
+from . import commands, discovery, hms_catalog, mqtt, protocol, snapshot, thumbnail
 from .camera import CameraStream
 from .config import _config_dir, save_config
 from .merge import Frame, MergedReport
@@ -459,6 +459,11 @@ class PrinterConnection:
             fields, job = snapshot.decode(
                 self.report.print, self.report.info, self.cfg.model, self.cfg.name
             )
+            # Bambu's own text for the codes (fetched catalogue; see hms_catalog).
+            try:
+                fields["errors"] = hms_catalog.describe(fields["errors"], self.cfg.serial)
+            except Exception as e:  # undescribed errors beat none
+                logger.warning("Describing the errors from %s failed: %s", self.cfg.name, e)
             self._update_thumbnail(job)
             state = PrinterState(
                 printer_id=self.cfg.id,
@@ -724,6 +729,10 @@ class PrinterManager:
         for pid in list(self._connections):
             self._spawn(self._connect_printer(pid))
         self._poll_task = asyncio.create_task(self._poll_loop())
+        # A newly loaded catalogue adds text to errors already on the cards.
+        hms_catalog.CATALOG.start(
+            lambda: [c.serial for c in self._config.printers], on_change=self._mark_all_dirty
+        )
         if self._discovery_port is not None:
             self._listener = discovery.SsdpListener(
                 self._on_announcement, port=self._discovery_port
@@ -742,6 +751,7 @@ class PrinterManager:
                 await self._poll_task
             except asyncio.CancelledError:
                 pass
+        await hms_catalog.CATALOG.stop()
         if self._push_handle is not None:
             self._push_handle.cancel()
             self._push_handle = None
@@ -1005,6 +1015,10 @@ class PrinterManager:
             self._push_handle = loop.call_later(
                 self.PUSH_DEBOUNCE_SECONDS, lambda: self._spawn(self._push())
             )
+
+    def _mark_all_dirty(self) -> None:
+        for pid, conn in list(self._connections.items()):
+            self._mark_dirty(pid, conn)
 
     async def _push(self) -> None:
         # Changes from here on schedule the next push.

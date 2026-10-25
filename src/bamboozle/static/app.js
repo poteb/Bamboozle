@@ -306,6 +306,7 @@ class BamboozleApp {
                 card.dataset.printerId = id;
                 this.grid.appendChild(card);
                 card.innerHTML = this.renderCard(id, state);
+                this.applyErrors(card.querySelector('.card-errors'), state);
             } else {
                 this.updateCard(card, id, state);
             }
@@ -709,7 +710,7 @@ class BamboozleApp {
             ${cameraHtml}
             <div class="card-bottom">
                 <div class="card-notice${notice && notice.quiet ? ' quiet' : ''}" role="status" title="${notice && !notice.quiet ? this.esc(notice.title) : ''}" data-key="${this.esc(this._noticeKey(notice))}">${this.noticeHtml(notice)}</div>
-                <div class="card-errors" role="status" data-key="${this.esc(this._errorsKey(s))}">${this.errorsHtml(s)}</div>
+                <div class="card-errors" role="status"></div>
                 <div class="job-section">${this.jobSectionHtml(s)}</div>
                 <div class="temps-row">${this.tempsRowHtml(s)}</div>
                 ${s.online && s.print_speed ? `
@@ -907,9 +908,11 @@ class BamboozleApp {
             + `<div class="card-notice-detail" aria-live="off">${this.esc(notice.title)}</div></details>`;
     }
 
-    // One HMS message / print error: "Warning · AMS 2 · <code linked to Bambu's
-    // wiki>", then our description when we have one. The text is Bambu's
-    // (not bundled), so the code links to it.
+    // One HMS message / print error. With a description: "Warning · <text>", then the module
+    // and linked code as small secondary text. The text itself is left out
+    // (an empty .error-text) and set with textContent by applyErrors: it's
+    // Bambu's catalogue text, downloaded at runtime. Without one, the line is
+    // "Warning · AMS 2 · <code>".
     errorLineHtml(e) {
         const label = ERROR_SEVERITY_LABELS[e.severity] || '';
         const code = this.esc(e.code);
@@ -917,10 +920,18 @@ class BamboozleApp {
             ? `<a href="${this.esc(e.url)}" target="_blank" rel="noopener noreferrer" `
                 + `title="Look up this code on Bambu Lab's wiki">${code}</a>`
             : code;
-        const parts = [label, e.module].filter(Boolean).map((p) => this.esc(p));
-        parts.push(codeHtml);
-        const desc = e.description ? `<div class="error-desc">${this.esc(e.description)}</div>` : '';
-        return `<div class="error-line">${parts.join(' · ')}${desc}</div>`;
+        const where = e.module ? `${this.esc(e.module)} · ` : '';
+        const sev = label ? `${this.esc(label)} · ` : '';
+        if (!e.description) return `<div class="error-line">${sev}${where}${codeHtml}</div>`;
+        return `<div class="error-line${e.undocumented ? ' undocumented' : ''}">`
+            + `<div class="error-desc">${sev}<span class="error-text"></span></div>`
+            + `<div class="error-meta">${where}${codeHtml}</div></div>`;
+    }
+
+    // The errors in display order: active, then lingering (server order within).
+    _errorGroups(s) {
+        if (!s.online || !Array.isArray(s.errors)) return { active: [], lingering: [] };
+        return { active: s.errors.filter((e) => e.active), lingering: s.errors.filter((e) => !e.active) };
     }
 
     // Inner HTML of the card's error area. Active errors (why the job is
@@ -928,9 +939,7 @@ class BamboozleApp {
     // the printer keeps until they're acknowledged on it, so they sit in a
     // quiet collapsed line instead of looking like a current fault.
     errorsHtml(s) {
-        if (!s.online || !Array.isArray(s.errors) || !s.errors.length) return '';
-        const active = s.errors.filter((e) => e.active);
-        const lingering = s.errors.filter((e) => !e.active);
+        const { active, lingering } = this._errorGroups(s);
         let html = '';
         if (active.length) {
             html += `<div class="card-errors-active">${active.map((e) => this.errorLineHtml(e)).join('')}</div>`;
@@ -947,16 +956,20 @@ class BamboozleApp {
 
     _errorsKey(s) {
         if (!s.online || !Array.isArray(s.errors)) return '';
-        return s.errors.map((e) => `${e.active ? 'a' : 'l'}:${e.code}:${e.severity}:${e.module}:${e.description}`).join('|');
+        return s.errors.map((e) => `${e.active ? 'a' : 'l'}:${e.code}:${e.severity}:${e.module}:${e.undocumented ? 'u' : ''}:${e.description}`).join('|');
     }
 
     // Update the error area in place, only when the errors change, so an open
-    // list of lingering messages stays open across updates.
+    // list of lingering messages stays open across updates. Descriptions go
+    // in with textContent, never as HTML (see errorLineHtml).
     applyErrors(el, s) {
         const key = this._errorsKey(s);
         if (el.dataset.key !== key) {
             el.dataset.key = key;
             el.innerHTML = this.errorsHtml(s);
+            const { active, lingering } = this._errorGroups(s);
+            const texts = [...active, ...lingering].filter((e) => e.description).map((e) => String(e.description));
+            el.querySelectorAll('.error-text').forEach((span, i) => { span.textContent = texts[i] || ''; });
         }
     }
 

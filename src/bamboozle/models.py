@@ -68,8 +68,12 @@ class PrinterError(BaseModel):
     code: str
     severity: Literal["", "fatal", "serious", "common", "info"] = ""
     module: str = ""  # e.g. "AMS 2", "Toolhead"; "" when unknown
-    description: str = ""  # our own words, for the few codes we understand
-    url: str  # Bambu's wiki for the code (their text isn't bundled: licence)
+    # Our own words for the few codes we understand, else Bambu's catalogue
+    # text (hms_catalog: fetched at runtime, never bundled); "" when unknown.
+    description: str = ""
+    # Bambu lists the code without any text (description says so).
+    undocumented: bool = False
+    url: str  # Bambu's wiki for the code
     # Likely why the job is paused / failed. Otherwise a lingering message:
     # the printer keeps them until they're acknowledged on it.
     active: bool = False

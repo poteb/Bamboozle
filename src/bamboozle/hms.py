@@ -7,6 +7,7 @@ Only the code structure is decoded here (severity, module, unit): those are
 protocol facts. The message text is not bundled. Bambu's wiki is "all rights
 reserved", Bambu Studio's HMS tables are AGPL, and ha-bambulab's (MIT) are
 downloaded from Bambu's own catalogue, so each code links to Bambu's wiki.
+Bambu's text is added afterwards by `hms_catalog`, fetched at runtime.
 
 - `hms[]` entries: `attr` is module, unit, part, part number (a byte each);
   `code` is the level (high 16 bits) then the error (low 16). Shown as
