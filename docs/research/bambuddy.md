@@ -12,7 +12,7 @@
 
 | # | Item | Group | Effort | Value |
 |---|------|-------|--------|-------|
-| 1 | Detect Developer Mode / "command verification failed" (`fun` bit + HMS `0500050000010007`) and say so in the UI | A | S | High: otherwise pause/stop/light silently do nothing |
+| 1 | Detect Developer Mode / "command verification failed" (`fun` bit + HMS `0500050000010007`) and say so in the UI | A | S | High: otherwise pause/stop/light silently do nothing *(light: disproved on H2C/P2S, see the §1 correction)* |
 | 2 | Fix MQTT teardown: `mqtt_stop()` only does `loop_stop()` (no `disconnect()`) and can block | A | S | High: hangs and leaked sessions on edit/relocate |
 | 3 | Staleness by last-message time (60 s) plus a "zero reports since connect → check serial" hint | A | S | High: catches the P1-series "connected but silent" broker bug |
 | 4 | Fix camera backoff never resetting after a good session; fast respawn | B | S | High: X1/P2 RTSP sessions drop routinely, so our gaps grow to 60 s |
@@ -81,6 +81,7 @@ Where Bamboozle is already **ahead** of BamBuddy: SSDP-driven IP auto-relocation
 - **Firmware authorization / Developer Mode** (the 2025 auth firmware):
   - `fun` field: dev mode is ON when `(fun & 0x20000000) == 0` ([#L2235-L2244](https://github.com/maziggy/bambuddy/blob/98ecaf5020e3a20a5de49859b8ad5a754d5ad85c/backend/app/services/bambu_mqtt.py#L2235), [#L5298](https://github.com/maziggy/bambuddy/blob/98ecaf5020e3a20a5de49859b8ad5a754d5ad85c/backend/app/services/bambu_mqtt.py#L5298)). A1/P1 never send `fun`.
   - HMS `0500050000010007` = "MQTT command verification failed" ([#L757](https://github.com/maziggy/bambuddy/blob/98ecaf5020e3a20a5de49859b8ad5a754d5ad85c/backend/app/services/bambu_mqtt.py#L757)). With it present, queries still work but every control command is silently dropped. The printer looks healthy while pause/print do nothing. They latch `developer_mode=False` from it and un-latch when it clears ([`_apply_mqtt_verify_state` #L5687](https://github.com/maziggy/bambuddy/blob/98ecaf5020e3a20a5de49859b8ad5a754d5ad85c/backend/app/services/bambu_mqtt.py#L5687)).
+  - **Correction (2026-10-25, observed on the user's printers):** "every control command is silently dropped" is too strong. The H2C and P2S report the `fun` off bit and carry this HMS, yet `ledctrl` chamber-light toggles from Bamboozle work on both. Which commands the firmware gates (print controls? speed? AMS / print start?) is unconfirmed. Bamboozle therefore shows Developer Mode off as a hint only and never reports a published command as failed because of it.
   - For printers without `fun`, they *probe* by re-sending the external slot's current `ams_filament_setting` and reading `result` / `reason` ([`_probe_developer_mode` #L5640](https://github.com/maziggy/bambuddy/blob/98ecaf5020e3a20a5de49859b8ad5a754d5ad85c/backend/app/services/bambu_mqtt.py#L5640)). They note the probe destabilised some brokers and is inconclusive on P1S 01.10. See §6: not recommended for us.
 - **Model specifics worth knowing:**
   - H2 dual nozzle is detected when `device.extruder.info` has 2 or more entries.
@@ -118,8 +119,8 @@ Bamboozle-side observations:
 ### 1.3 Recommendations (A)
 
 **A1. Developer Mode / command-refused detection.** S. *Do first.*
-- **What:** Read `print.fun` (dev mode ON iff `fun & 0x20000000 == 0`) and scan `print.hms[]` for full code `0500050000010007` (attr `0x05000500`, code `0x00010007`). Expose `developer_mode: bool | None` and `commands_blocked: bool` on `PrinterState`. Show a badge: "Printer is refusing control commands: enable LAN Only + Developer Mode on the printer, then restart it".
-- **Value:** pause/stop/light/speed currently fail silently on non-dev-mode firmware. The API returns `True` (published, not accepted).
+- **What:** Read `print.fun` (dev mode ON iff `fun & 0x20000000 == 0`) and scan `print.hms[]` for full code `0500050000010007` (attr `0x05000500`, code `0x00010007`). Expose `developer_mode: bool | None` and `commands_blocked: bool` on `PrinterState`. Show a badge: "Printer is refusing control commands: enable LAN Only + Developer Mode on the printer, then restart it". *(Superseded: see the 2026-10-25 correction in §1. It's now a quiet "may be ignored" hint driven by `fun` only, and commands are never failed because of it.)*
+- **Value:** pause/stop/light/speed currently fail silently on non-dev-mode firmware *(light: disproved on H2C/P2S, see the §1 correction)*. The API returns `True` (published, not accepted).
 - **BamBuddy:** [bambu_mqtt.py#L757](https://github.com/maziggy/bambuddy/blob/98ecaf5020e3a20a5de49859b8ad5a754d5ad85c/backend/app/services/bambu_mqtt.py#L757), [#L2235](https://github.com/maziggy/bambuddy/blob/98ecaf5020e3a20a5de49859b8ad5a754d5ad85c/backend/app/services/bambu_mqtt.py#L2235), [#L5687](https://github.com/maziggy/bambuddy/blob/98ecaf5020e3a20a5de49859b8ad5a754d5ad85c/backend/app/services/bambu_mqtt.py#L5687).
 - **Bamboozle:** `printer_manager.py` `_read_sync` (read from `mqtt_dump()["print"]`), `models.py` `PrinterState`, `static/app.js`.
 - **Risks:** `fun` is absent on A1/P1, so show "unknown" rather than guessing. Do **not** copy the write-probe (§6).

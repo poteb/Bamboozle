@@ -331,15 +331,9 @@ class BamboozleApp {
         // Update camera feed — only add/remove, never replace an active stream
         this.updateCamera(card, id, s);
 
-        // Update notice line (refused access code / refused commands)
+        // Update notice line (refused access code / Developer Mode off ...)
         const noticeEl = card.querySelector('.card-notice');
-        if (noticeEl) {
-            const notice = this.cardNotice(s);
-            const text = notice ? notice.text : '';
-            // Only touch the live region when the text actually changes.
-            if (noticeEl.textContent !== text) noticeEl.textContent = text;
-            noticeEl.title = notice ? notice.title : '';
-        }
+        if (noticeEl) this.applyNotice(noticeEl, this.cardNotice(s));
 
         const isPrinting = s.gcode_state === 'RUNNING';
         const isPaused = s.gcode_state === 'PAUSE';
@@ -730,7 +724,7 @@ class BamboozleApp {
             </header>
             ${cameraHtml}
             <div class="card-bottom">
-                <div class="card-notice" role="status" title="${notice ? this.esc(notice.title) : ''}">${notice ? this.esc(notice.text) : ''}</div>
+                <div class="card-notice${notice && notice.quiet ? ' quiet' : ''}" role="status" title="${notice && !notice.quiet ? this.esc(notice.title) : ''}" data-key="${this.esc(this._noticeKey(notice))}">${this.noticeHtml(notice)}</div>
                 <div class="job-section">${hasJob ? `
                     <div class="file-name">${this.esc(s.file_name || 'Unknown file')}</div>
                     ${this._thumbnailNoteHtml(s)}
@@ -785,6 +779,7 @@ class BamboozleApp {
     }
 
     // One line of "why isn't this working" on the card, or null.
+    // `quiet` marks an informational hint rather than a problem.
     cardNotice(s) {
         if (!s.online && s.last_error === 'auth_rejected') {
             return {
@@ -804,12 +799,46 @@ class BamboozleApp {
             const text = 'No data from the printer for over a minute: reconnecting';
             return { text, title: text };
         }
-        if (s.online && s.commands_blocked) {
-            const text = 'Printer is refusing control commands: enable LAN Only + '
-                + 'Developer Mode on the printer, then restart it';
-            return { text, title: text };
+        if (s.online && s.developer_mode === false) {
+            // A fact, not a claim: the light works with it off on the H2C and
+            // P2S; which print controls the firmware drops is unconfirmed.
+            return {
+                text: 'Developer Mode off: print controls (pause, resume, stop, speed) '
+                    + 'may be ignored',
+                title: 'The printer reports Developer Mode off. Its firmware may silently '
+                    + 'ignore print controls from LAN apps (the light works on some models). '
+                    + 'To allow them, enable LAN Only + Developer Mode on the printer, then '
+                    + 'restart it. This changes the access code: update it in Settings.',
+                quiet: true,
+            };
         }
         return null;
+    }
+
+    // Inner HTML of the notice line. A quiet hint is a <details> whose body
+    // holds the fix, so it's reachable by keyboard and touch, not only hover.
+    noticeHtml(notice) {
+        if (!notice) return '';
+        if (!notice.quiet) return this.esc(notice.text);
+        return `<details><summary>${this.esc(notice.text)}</summary>`
+            // aria-live off: opening it isn't a status change to announce.
+            + `<div class="card-notice-detail" aria-live="off">${this.esc(notice.title)}</div></details>`;
+    }
+
+    _noticeKey(notice) {
+        return notice ? `${notice.quiet ? 'q' : 'w'}:${notice.text}` : '';
+    }
+
+    // Update the notice line in place. The content (a live region, maybe an
+    // open <details>) is only replaced when the notice itself changes.
+    applyNotice(el, notice) {
+        const key = this._noticeKey(notice);
+        if (el.dataset.key !== key) {
+            el.dataset.key = key;
+            el.innerHTML = this.noticeHtml(notice);
+        }
+        el.title = notice && !notice.quiet ? notice.title : '';
+        el.classList.toggle('quiet', !!(notice && notice.quiet));
     }
 
     getStatusClass(s) {
@@ -934,10 +963,11 @@ class BamboozleApp {
         setTimeout(() => toast.remove(), 4000);
     }
 
+    // Safe in text and in double-quoted attributes.
     esc(str) {
         const d = document.createElement('div');
         d.textContent = str;
-        return d.innerHTML;
+        return d.innerHTML.replace(/"/g, '&quot;');
     }
 }
 
