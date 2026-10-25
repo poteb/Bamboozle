@@ -1,3 +1,7 @@
+// The reconnecting marker stays hidden this long after page load so a normal
+// (fast) WS connect doesn't flash it.
+const WS_MARKER_GRACE_MS = 1000;
+
 const STATUS_PRIORITY = {
     'RUNNING': 0, 'PAUSE': 1, 'PREPARE': 2, 'FINISH': 3, 'FAILED': 4, 'IDLE': 5, 'UNKNOWN': 6,
 };
@@ -139,36 +143,35 @@ class BamboozleApp {
 
         // Set once any WS init/update has been applied; the HTTP initial load
         // must not overwrite newer WS data after that.
-        this._wsApplied = false;
-        // The reconnecting marker stays hidden for the first second after
-        // load so a normal (fast) WS connect doesn't flash it.
+        this._wsStateReceived = false;
+        // Armed after WS_MARKER_GRACE_MS; see _updateWsMarker.
         this._wsMarkerArmed = false;
 
         if (this.grid) {
-            this.loadInitial();
+            this._loadInitial();
             this.connect();
             setTimeout(() => {
                 this._wsMarkerArmed = true;
                 this._updateWsMarker();
-            }, 1000);
+            }, WS_MARKER_GRACE_MS);
         }
     }
 
     // Plain HTTP isn't subject to the browser's WebSocket reconnect throttling
     // (Firefox can delay a new WS by up to ~60s), so render from it first.
-    async loadInitial() {
+    async _loadInitial() {
         try {
             const res = await fetch('/api/printers');
             if (!res.ok) return;
             const data = await res.json();
-            this.applyInitialPrinters(data.printers);
+            this._applyInitialPrinters(data.printers);
         } catch {
             // Stay silent; the WS init will fill the dashboard.
         }
     }
 
-    applyInitialPrinters(list) {
-        if (this._wsApplied || !Array.isArray(list)) return;
+    _applyInitialPrinters(list) {
+        if (this._wsStateReceived || !Array.isArray(list)) return;
         for (const state of list) {
             if (state && state.printer_id) this.printers[state.printer_id] = state;
         }
@@ -261,7 +264,7 @@ class BamboozleApp {
 
     onMessage(msg) {
         if (msg.type === 'init' || msg.type === 'update') {
-            this._wsApplied = true;
+            this._wsStateReceived = true;
             for (const [id, state] of Object.entries(msg.printers)) {
                 this.printers[id] = state;
             }

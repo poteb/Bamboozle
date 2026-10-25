@@ -140,7 +140,7 @@ test('a non-OK HTTP response is silent and ignored', async () => {
 test('reconnecting marker stays hidden during the first second after load', () => {
     const { marker, timers } = setup();
     assert.equal(marker.hidden, true);
-    assert.ok(timers.some((t) => t.ms === 1000), 'a ~1s grace timer is armed');
+    assert.ok(timers.some((t) => t.ms === 1000), 'a 1s grace timer is armed');
 });
 
 test('reconnecting marker shows after the grace period while the WS is not open', () => {
