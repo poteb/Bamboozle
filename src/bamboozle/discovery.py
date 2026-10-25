@@ -21,6 +21,7 @@ SSDP_PORT = 2021
 MQTT_PORT = 8883
 
 _SERIAL_RE = re.compile(r"^[A-Za-z0-9]{6,32}$")
+_MAX_FIELD_LEN = 64  # DevName / DevModel are free text from the network
 
 
 @dataclass(frozen=True)
@@ -57,8 +58,8 @@ def parse_announcement(data: bytes) -> Announcement | None:
     return Announcement(
         ip=ip,
         serial=serial,
-        model=headers.get("devmodel.bambu.com", ""),
-        name=headers.get("devname.bambu.com", ""),
+        model=headers.get("devmodel.bambu.com", "")[:_MAX_FIELD_LEN],
+        name=headers.get("devname.bambu.com", "")[:_MAX_FIELD_LEN],
     )
 
 

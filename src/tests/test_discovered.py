@@ -199,3 +199,53 @@ def test_discovery_endpoint_shape(clock):
     assert [p["serial"] for p in body["printers"]] == [A1.serial]
     assert set(body["printers"][0]) == {
         "ip", "serial", "name", "model", "model_name", "camera_port", "last_seen_s"}
+
+
+def test_unnamed_printers_sort_by_their_serial(clock):
+    """The UI shows the serial when there's no name, so sort on what's shown."""
+    mgr = _manager()
+    mgr._on_announcement(Announcement(ip="192.168.0.5", serial="ZZZZZZ111111"))
+    mgr._on_announcement(A1)   # "Workshop A1"
+    mgr._on_announcement(H2C)  # "Bench H2C"
+    assert [p["serial"] for p in mgr.discovered_printers()] == [
+        H2C.serial, A1.serial, "ZZZZZZ111111"]
+
+
+def test_configured_serial_still_triggers_relocation_check(clock):
+    async def scenario():
+        mgr = _manager(CONFIGURED)
+        await mgr.start()
+        seen = []
+
+        async def record(ann):
+            seen.append(ann.serial)
+        mgr.handle_announcement = record
+        mgr._on_announcement(Announcement(ip="192.168.0.99", serial=CONFIGURED.lower()))
+        mgr._on_announcement(A1)  # unconfigured: cached only
+        await asyncio.sleep(0)
+        await mgr.stop()
+        return seen
+
+    assert asyncio.run(scenario()) == [CONFIGURED.lower()]
+
+
+def test_settings_sidebar_keeps_printer_fields_out_of_inline_js():
+    """A network-supplied name like x');alert(1)// must not reach an onclick."""
+    import html
+    import re
+
+    from bamboozle.routers import pages
+
+    evil = "x');alert(1)//"
+    mgr = PrinterManager(AppConfig(printers=[PrinterConfig(
+        id="p1", name=evil, ip="192.168.0.5", access_code="c0de'1", serial="ABCDEF123456")]),
+        discovery_port=None)
+    app = FastAPI()
+    app.include_router(pages.router)
+    app.state.manager = mgr
+    page = TestClient(app).get("/settings").text
+
+    handlers = [html.unescape(h) for h in re.findall(r'onclick="([^"]*)"', page)]
+    assert not any("alert" in h or "c0de" in h for h in handlers)
+    names = [html.unescape(n) for n in re.findall(r'data-name="([^"]*)"', page)]
+    assert names and set(names) == {evil}

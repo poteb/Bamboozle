@@ -55,3 +55,13 @@ def test_rejects_public_location():
     assert parse_announcement(
         b"NOTIFY * HTTP/1.1\r\nLocation: 8.8.8.8\r\nUSN: 01P00C511100150\r\n\r\n"
     ) is None
+
+
+def test_long_name_and_model_are_truncated():
+    pkt = (
+        "NOTIFY * HTTP/1.1\r\nLocation: 192.168.0.102\r\nUSN: 03919D533005771\r\n"
+        f"DevModel.bambu.com: {'M' * 500}\r\nDevName.bambu.com: {'N' * 5000}\r\n\r\n"
+    ).encode()
+    ann = parse_announcement(pkt)
+    assert ann.name == "N" * 64
+    assert ann.model == "M" * 64

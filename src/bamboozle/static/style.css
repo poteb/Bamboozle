@@ -551,6 +551,7 @@
     font: inherit;
     font-size: 0.85rem;
     cursor: pointer;
+    overflow-wrap: anywhere;
 }
 
 .discovery .discovery-item:hover {

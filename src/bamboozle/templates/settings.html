@@ -17,7 +17,10 @@
             {% for p in printers %}
             <li data-name="{{ p.name }}">
                 <button type="button" class="printer-link" data-id="{{ p.id }}"
-                    onclick="editPrinter('{{ p.id }}', '{{ p.name }}', '{{ p.ip }}', '{{ p.access_code }}', '{{ p.serial }}', {{ p.camera_port }}, {{ 'true' if p.camera_enabled else 'false' }}, {{ p.sort }})">
+                    data-name="{{ p.name }}" data-ip="{{ p.ip }}" data-code="{{ p.access_code }}"
+                    data-serial="{{ p.serial }}" data-camera-port="{{ p.camera_port }}"
+                    data-camera-enabled="{{ 'true' if p.camera_enabled else 'false' }}" data-sort="{{ p.sort }}"
+                    onclick="editPrinterFromLink(this)">
                     {{ p.name }}
                 </button>
             </li>
@@ -180,6 +183,14 @@ function newPrinter() {
     startDiscovery();
 }
 
+// Printer fields travel in data-* attributes, never inline JS: names can come
+// from network announcements.
+function editPrinterFromLink(el) {
+    const d = el.dataset;
+    editPrinter(d.id, d.name, d.ip, d.code, d.serial, d.cameraPort,
+        d.cameraEnabled === 'true', parseInt(d.sort) || 0);
+}
+
 function editPrinter(id, name, ip, code, serial, cameraPort, cameraEnabled, sort) {
     document.getElementById('edit-id').value = id;
     document.getElementById('printer-name').value = name;
@@ -230,6 +241,7 @@ async function pollDiscovery() {
         if (gen === discoveryGen) renderDiscovery(data);
     } catch (err) {
         if (gen === discoveryGen) {
+            document.getElementById('discovery-list').replaceChildren();
             document.getElementById('discovery-note').textContent = 'Discovery unavailable. Enter details manually.';
         }
     }

@@ -771,7 +771,8 @@ class PrinterManager:
                 "camera_port": camera_port,
                 "last_seen_s": round(now - seen, 1),
             })
-        result.sort(key=lambda p: (p["name"].casefold(), p["serial"]))
+        # The UI shows the serial when there's no name; sort on what's shown.
+        result.sort(key=lambda p: ((p["name"] or p["serial"]).casefold(), p["serial"]))
         return result
 
     def get_connection(self, printer_id: str) -> PrinterConnection | None:
