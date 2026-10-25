@@ -404,9 +404,13 @@ class PrinterConnection:
         print_payload = self._dump_part(dump, "print") or {}
         developer_mode = protocol.developer_mode(print_payload)
         # Temperatures, stage, fans, AMS units, door ... (see report.py).
-        status = report.status_fields(print_payload, self._dump_part(dump, "info"), self.cfg.model)
+        try:
+            status = report.status_fields(print_payload, self._dump_part(dump, "info"), self.cfg.model)
+        except Exception as e:  # the decoders are defensive; never lose the read
+            logger.warning("Decoding the report from %s failed: %s", self.cfg.name, e)
+            status = {}
 
-        online = gcode_str != "UNKNOWN" or status["nozzle_temp"] is not None
+        online = gcode_str != "UNKNOWN" or status.get("nozzle_temp") is not None
 
         display_name = subtask or file_name
         job = _Job(
@@ -544,7 +548,7 @@ class PrinterConnection:
     @staticmethod
     def _dump_part(dump: dict, key: str) -> dict | None:
         """One top-level object of a dump: `print` (status reports) or `info`
-        (the get_version reply the library requests on connect)."""
+        (the reply to get_version, see `_ask_version`)."""
         part = dump.get(key)
         return part if isinstance(part, dict) else None
 

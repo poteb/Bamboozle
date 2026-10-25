@@ -32,7 +32,7 @@ NO_REPORTS = "no_reports"
 STALE = "stale"  # reports stopped (P1-series brokers can go silent, socket up)
 
 
-def _hex_or_int(value: Any) -> int | None:
+def hex_or_int(value: Any) -> int | None:
     """Ints pass through; strings are read as hex. Anything else is None."""
     if isinstance(value, bool):
         return None
@@ -53,7 +53,7 @@ def developer_mode(print_payload: dict) -> bool | None:
     a fallback: it records a past refusal, not the current state, and the
     user's H2C / P2S carry it while the light works.
     """
-    fun = _hex_or_int(print_payload.get("fun"))
+    fun = hex_or_int(print_payload.get("fun"))
     if fun is None:
         return None
     return not fun & DEV_MODE_OFF_BIT
@@ -71,8 +71,8 @@ def hms_codes(print_payload: dict) -> set[str]:
     for entry in entries:
         if not isinstance(entry, dict):
             continue
-        attr = _hex_or_int(entry.get("attr"))
-        code = _hex_or_int(entry.get("code"))
+        attr = hex_or_int(entry.get("attr"))
+        code = hex_or_int(entry.get("code"))
         if attr is None or code is None:
             continue
         codes.add(f"{attr:08X}{code:08X}")

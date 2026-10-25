@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 from .models import AmsUnit, Fans, Nozzle
-from .protocol import _hex_or_int
+from .protocol import hex_or_int
 
 # DevModel codes. X1 family: the flat `chamber_temper` is a real sensor and the
 # door is `home_flag` bit 23. H2 / P2S report the chamber under `device.ctc`.
@@ -62,7 +62,7 @@ STAGE_NAMES: dict[int, str] = {
     28: "Paused: chamber temp fault",
     29: "Cooling chamber",
     30: "Paused by G-code",
-    31: "Motor noise showoff",
+    31: "Demonstrating motor noise",
     32: "Paused: nozzle clumping",
     33: "Paused: cutter error",
     34: "Paused: first layer error",
@@ -261,12 +261,16 @@ def stage_name(stage_number: int | None, gcode_state: str) -> str:
 
 # --- Fans -----------------------------------------------------------------------
 
+# Fan speeds are reported on a 0-15 scale; 1.5 units per 10 % step.
+_FAN_UNITS_PER_STEP = 1.5
+
+
 def fan_percent(value: Any) -> int | None:
     """Fan speed from the report's 0-15 scale, in 10 % steps."""
     n = _int(value)
     if n is None:
         return None
-    return min(100, max(0, round(n / 1.5) * 10))
+    return min(100, max(0, round(n / _FAN_UNITS_PER_STEP) * 10))
 
 
 def fans(print_payload: dict, model: str) -> Fans:
@@ -320,7 +324,7 @@ def door_open(print_payload: dict, model: str) -> bool | None:
     if model in _X1_FAMILY:
         flags = _int(print_payload.get("home_flag"))
     else:
-        flags = _hex_or_int(print_payload.get("stat"))
+        flags = hex_or_int(print_payload.get("stat"))
     if flags is None:
         return None
     return bool(flags & _DOOR_BIT)

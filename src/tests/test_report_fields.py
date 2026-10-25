@@ -406,3 +406,13 @@ def test_no_version_request_while_offline():
     state = asyncio.run(conn.read_state())
     assert not state.online
     assert _version_requests(conn) == []
+
+
+def test_a_decoder_failure_keeps_the_rest_of_the_read(monkeypatch):
+    def boom(*_args):
+        raise ValueError("bad report")
+
+    monkeypatch.setattr(report, "status_fields", boom)
+    state = _read({"print": {"gcode_state": "IDLE", "nozzle_temper": 25.0}})
+    assert state.nozzles == []
+    assert state.stage_name == ""
