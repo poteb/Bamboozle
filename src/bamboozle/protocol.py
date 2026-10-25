@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import unquote
 
 # `fun` is a hex bitfield sent by newer firmware (H2*, P2S, X1 on the 2025
 # authorization firmware); A1 / P1 don't send it. When this bit is SET,
@@ -98,3 +99,39 @@ def connack_failed(reason_code: Any) -> bool:
 def is_auth_refusal(reason_code: Any) -> bool:
     """True for a CONNACK refusing our credentials (ReasonCode, or 134 / 135)."""
     return getattr(reason_code, "value", reason_code) in _AUTH_REFUSAL_CODES
+
+
+# Where a print file is stored, from the `url` echoed in a `project_file`
+# report (sent when a print starts): `ftp://<name>` is external storage
+# (SD card / USB drive), these are the internal eMMC (H2 series, P2S default).
+_INTERNAL_URL_PREFIXES = ("brtc://emmc/", "file:///userdata/")
+THUMBNAIL_INTERNAL_STORAGE = "internal_storage"
+
+
+def file_on_internal_storage(print_payload: dict) -> bool:
+    """True when the print file can't be on the FTPS share (port 990 serves
+    external storage only): no SD card / USB drive is inserted, or the job
+    was sent to internal storage.
+
+    Reports are merged, so `url` is from the latest `project_file` seen; it
+    only counts when it names the current job (`subtask_name`).
+    """
+    if print_payload.get("sdcard") is False:
+        return True
+    url = print_payload.get("url")
+    subtask = print_payload.get("subtask_name")
+    if not isinstance(url, str) or not isinstance(subtask, str) or not subtask:
+        return False
+    url = unquote(url)
+    if not url.lower().startswith(_INTERNAL_URL_PREFIXES):
+        return False
+    name = _strip_print_ext(url.rsplit("/", 1)[-1])
+    subtask = _strip_print_ext(subtask)
+    return name in (subtask, subtask.replace(" ", "_"))
+
+
+def _strip_print_ext(name: str) -> str:
+    for ext in (".gcode.3mf", ".3mf", ".gcode"):
+        if name.lower().endswith(ext):
+            return name[: -len(ext)]
+    return name
