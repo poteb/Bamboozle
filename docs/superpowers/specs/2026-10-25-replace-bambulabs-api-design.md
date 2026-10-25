@@ -137,7 +137,7 @@ The payloads are the same for all four models: OpenBambuAPI `mqtt.md` documents 
   - P1S: once the first full report has been seen, the 4 AMS trays (and the AMS humidity) are present after every message;
   - A1: trays follow `tray_exist_bits` and the later unit push; never blank after the first full report; the print start (FINISH → PREPARE → RUNNING) shows through;
   - at every full report, the state decoded from the merge equals the state decoded from that full report alone (weak: holds largely by construction);
-  - stronger: on the A1/P1S, the state merged from deltas *just before* each full report equals that full report's, except for fields that drift between the two (nozzle / bed temperature, Wi-Fi);
+  - stronger: on the A1/P1S, the state merged from deltas *just before* each full report equals that full report's, except for fields that drift between the two (nozzle / bed temperature incl. the `nozzles` list, Wi-Fi). Only the A1 capture has full reports after the first one, so this runs on the A1 only;
   - H2C / P2S have no deltas in the fixtures, so deltas are synthesised (they encode the merge's own idea of a delta, so they test consistency, not the real shape) from consecutive full reports (only the keys that changed, `msg` 1), replayed after the first full report, and must decode to the same state as the full reports.
 - Command payload tests per model, confirmation predicates, verification outcomes (confirmed, timeout, refused echo, already-in-state, publish failure, invalid params).
 - Event flow tests: report → one debounced WS update; identical reports → no second update; burst → one update; removed printer not broadcast; heartbeat.

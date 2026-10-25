@@ -59,16 +59,8 @@ async def websocket_endpoint(ws: WebSocket):
         # own task, so the socket keeps reading meanwhile.
         result = await manager.execute_command(printer_id, action, params)
         try:
-            await ws.send_json(
-                {
-                    "type": "command_result",
-                    "printer_id": printer_id,
-                    "action": action,
-                    "success": result.success,
-                    "message": result.message,
-                    "confirmed": result.confirmed,
-                }
-            )
+            await ws.send_json({"type": "command_result", "printer_id": printer_id,
+                                "action": action, **result._asdict()})
         except Exception:
             pass  # the dashboard went away meanwhile
 

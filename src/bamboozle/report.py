@@ -10,6 +10,7 @@ are protocol facts); the stage wording is our own.
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from .models import AmsUnit, Fans, Filament, Nozzle
@@ -117,17 +118,19 @@ _NOZZLE_TYPE_NAMES = {
 # --- Number parsing ---------------------------------------------------------
 
 def _num(value: Any) -> float | None:
-    """Ints, floats and numeric strings as float; anything else None."""
+    """Finite ints, floats and numeric strings as float; anything else None."""
     if isinstance(value, bool):
         return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value.strip())
-        except ValueError:
+    try:
+        if isinstance(value, (int, float)):
+            n = float(value)
+        elif isinstance(value, str):
+            n = float(value.strip())
+        else:
             return None
-    return None
+    except (ValueError, OverflowError):
+        return None
+    return n if math.isfinite(n) else None
 
 
 def _int(value: Any) -> int | None:
@@ -370,12 +373,17 @@ def _count(value: Any) -> int:
     return int(n) if n is not None else 0
 
 
-def light_on(print_payload: dict) -> bool:
-    """The chamber light from `lights_report` (`chamber_light`, else the
-    first node listed)."""
+def light_mode(print_payload: dict) -> str:
+    """The chamber light's mode ("on", "off", "flashing") from `lights_report`:
+    the `chamber_light` node, else the first node listed; "" when unknown."""
     nodes = _list(print_payload.get("lights_report"))
     node = next((n for n in nodes if n.get("node") == "chamber_light"), nodes[0] if nodes else None)
-    return node is not None and node.get("mode") == "on"
+    mode = node.get("mode") if node is not None else None
+    return mode if isinstance(mode, str) else ""
+
+
+def light_on(print_payload: dict) -> bool:
+    return light_mode(print_payload) == "on"
 
 
 def _text(value: Any) -> str:
@@ -438,7 +446,7 @@ def filaments(print_payload: dict) -> list[Filament]:
     one per extruder) when it's a non-empty list, else `vt_tray`."""
     out: list[Filament] = []
     ams = print_payload.get("ams")
-    if isinstance(ams, dict) and str(ams.get("ams_exist_bits", "0")) not in ("0", ""):
+    if isinstance(ams, dict) and hex_or_int(ams.get("ams_exist_bits")):
         for unit_pos, unit in enumerate(_list(ams.get("ams"))):
             unit_index = _index(unit.get("id"), unit_pos)
             for slot_pos, tray in enumerate(_list(unit.get("tray"))):
@@ -447,7 +455,7 @@ def filaments(print_payload: dict) -> list[Filament]:
                     out.append(f)
     vir_slot = print_payload.get("vir_slot")
     if isinstance(vir_slot, list) and vir_slot:
-        externals = [(pos, slot) for pos, slot in enumerate(vir_slot)]
+        externals = list(enumerate(vir_slot))
     else:
         vt = print_payload.get("vt_tray")
         externals = [(0, vt)] if isinstance(vt, dict) and vt else []

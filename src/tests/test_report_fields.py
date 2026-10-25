@@ -459,3 +459,32 @@ def test_a_new_session_asks_for_the_version_again(monkeypatch):
     assert len(_version_requests(conn)) == 1
     asyncio.run(conn.reset_session())
     assert conn._version_asked_at == float("-inf")
+
+
+# --- Hostile numbers (threat model: reports never take a card down) ---------------
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", float("nan"), float("inf"), 10 ** 400, "1e400"])
+def test_non_finite_numbers_read_as_missing(value):
+    assert report._num(value) is None
+
+
+def test_a_report_with_hostile_numbers_still_decodes():
+    from bamboozle import snapshot
+    fields, job = snapshot.decode({"gcode_state": "RUNNING", "mc_percent": "nan",
+                                   "layer_num": 10 ** 400, "mc_remaining_time": float("inf"),
+                                   "nozzle_temper": "1e400"}, None, "")
+    assert fields["online"] is True
+    assert (fields["progress"], fields["current_layer"], fields["remaining_minutes"]) == (0, 0, 0)
+    assert fields["nozzle_temp"] is None
+
+
+def test_a_failing_decoder_costs_only_its_own_fields(monkeypatch):
+    from bamboozle import snapshot
+
+    def boom(*_):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(report, "job_fields", boom)
+    fields, job = snapshot.decode({"gcode_state": "RUNNING", "nozzle_temper": 200}, None, "")
+    assert fields["gcode_state"] == "UNKNOWN"
+    assert fields["nozzle_temp"] == 200.0 and fields["online"] is True

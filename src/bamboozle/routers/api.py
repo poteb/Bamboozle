@@ -6,8 +6,8 @@ import threading
 from fastapi import APIRouter, HTTPException, Request
 
 from .. import discovery, mqtt, protocol
-from ..merge import MergedReport
 from ..config import save_config
+from ..merge import MergedReport
 from ..models import PrinterAddRequest, PrinterConfig, PrinterState, PrinterUpdateRequest
 
 router = APIRouter()
@@ -20,7 +20,7 @@ TEST_REPORT_TIMEOUT = 5.0
 
 def _result(result) -> dict:
     """A command's outcome (PrinterManager.execute_command) as JSON."""
-    return {"success": result.success, "message": result.message, "confirmed": result.confirmed}
+    return result._asdict()
 
 
 @router.get("/printers")

@@ -1,12 +1,13 @@
 """Command payloads and their confirmation rules. These payloads are never
-sent to a real printer by the tests."""
+sent to a real printer by the tests.
+
+The payloads are the same for the A1, P1S, H2C and P2S (OpenBambuAPI
+`mqtt.md`; Bambu Studio's DeviceManager has no model branch for them), so
+`build` takes no model."""
 import pytest
 
 from bamboozle import commands
 from bamboozle.merge import Frame
-
-MODELS = ["N2S", "C12", "O1C2", "N7"]  # A1, P1S, H2C, P2S
-
 
 def _seq_free(payload):
     """The payload without its sequence_id (it increments)."""
@@ -15,7 +16,6 @@ def _seq_free(payload):
     return {section: {k: v for k, v in body.items() if k != "sequence_id"}}
 
 
-@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("action,params,expected", [
     ("pause", {}, {"print": {"command": "pause", "param": ""}}),
     ("resume", {}, {"print": {"command": "resume", "param": ""}}),
@@ -25,18 +25,17 @@ def _seq_free(payload):
     ("set_speed", {"level": "3"}, {"print": {"command": "print_speed", "param": "3"}}),
     ("refresh", {}, {"pushing": {"command": "pushall"}}),
 ])
-def test_print_command_payloads_are_the_same_for_every_model(model, action, params, expected):
-    cmd = commands.build(action, params, model)
+def test_print_command_payloads(action, params, expected):
+    cmd = commands.build(action, params)
     assert [_seq_free(p) for p in cmd.requests] == [expected]
 
 
-@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("action,params,mode", [
     ("light_on", {}, "on"), ("light_off", {}, "off"),
     ("set_light", {"mode": "on"}, "on"), ("set_light", {"mode": "off"}, "off"),
 ])
-def test_light_goes_to_both_chamber_nodes(model, action, params, mode):
-    cmd = commands.build(action, params, model)
+def test_light_goes_to_both_chamber_nodes(action, params, mode):
+    cmd = commands.build(action, params)
     bodies = [_seq_free(p)["system"] for p in cmd.requests]
     assert [b["led_node"] for b in bodies] == ["chamber_light", "chamber_light2"]
     assert all(b["command"] == "ledctrl" and b["led_mode"] == mode for b in bodies)
@@ -108,3 +107,15 @@ def test_print_controls_are_flagged():
     assert all(commands.build(a, p).print_control for a, p in
                [("pause", {}), ("resume", {}), ("stop", {}), ("set_speed", {"level": 2})])
     assert not any(commands.build(a, {}).print_control for a in ("light_on", "light_off", "refresh"))
+
+
+def test_the_echo_a_refusal_is_judged_on_is_the_first_requests():
+    cmd = commands.build("light_on", {})
+    body = cmd.requests[0]["system"]
+    assert cmd.echo == ("ledctrl", body["sequence_id"]) and body["led_node"] == "chamber_light"
+
+
+def test_only_refresh_skips_the_midway_pushall():
+    assert not commands.build("refresh", {}).pushall_midway
+    assert all(commands.build(a, {"level": 2}).pushall_midway
+               for a in ("pause", "resume", "stop", "set_speed", "light_on", "light_off"))

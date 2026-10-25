@@ -1,6 +1,6 @@
 """The dashboard's printer commands: what to publish, and how to tell it worked.
 
-Pure. `build(action, params)` validates the (untrusted, from the browser)
+No I/O (only the shared `sequence_id` counter advances). `build(action, params)` validates the (untrusted, from the browser)
 action and params, and returns the requests plus a `confirmed(print, frame)`
 rule over the merged report: a command counts as done when the printer's
 state shows it, not when the publish went out.
@@ -20,7 +20,7 @@ from typing import Any, Callable
 
 from . import mqtt
 from .merge import Frame
-from .report import gcode_state
+from .report import gcode_state, light_mode
 
 SPEED_LEVELS = range(1, 5)
 LIGHT_MODES = frozenset({"on", "off"})
@@ -43,6 +43,17 @@ class Command:
     print_control: bool  # one the firmware may ignore with Developer Mode off
     # For "... the printer didn't report <waiting_for> within 10 s".
     waiting_for: str = "the change"
+    # Ask for a full report halfway through an unconfirmed wait (an A1 / P1S
+    # delta may not carry the changed field). Pointless for Refresh itself.
+    pushall_midway: bool = True
+
+    @property
+    def echo(self) -> tuple[str, str]:
+        """(command, sequence_id) of the printer's echo of the first request:
+        the one a refusal is judged on (for the light, the chamber_light one;
+        printers without chamber_light2 may refuse that)."""
+        (body,) = self.requests[0].values()
+        return str(body.get("command", "")), str(body.get("sequence_id", ""))
 
 
 def _state_is(*states: str) -> Callable[[dict, Frame | None], bool]:
@@ -50,13 +61,7 @@ def _state_is(*states: str) -> Callable[[dict, Frame | None], bool]:
 
 
 def _light_is(mode: str) -> Callable[[dict, Frame | None], bool]:
-    def confirmed(print_state: dict, frame: Frame | None) -> bool:
-        nodes = print_state.get("lights_report")
-        if not isinstance(nodes, list):
-            return False
-        return any(isinstance(n, dict) and n.get("node") == "chamber_light" and n.get("mode") == mode
-                   for n in nodes)
-    return confirmed
+    return lambda print_state, frame: light_mode(print_state) == mode
 
 
 def _speed_is(level: int) -> Callable[[dict, Frame | None], bool]:
@@ -90,10 +95,8 @@ def _light(mode: str) -> Command:
                    f"Light {mode}", f"Light turned {mode}", print_control=False)
 
 
-def build(action: str, params: Any = None, model: str = "") -> Command:
-    """The command for a dashboard action. `model` is the printer's DevModel
-    code: no model needs a different payload today, but it's the place one
-    would go."""
+def build(action: str, params: Any = None) -> Command:
+    """The command for a dashboard action (the same payloads for every model)."""
     if params is None:
         params = {}
     if not isinstance(params, dict):
@@ -124,6 +127,6 @@ def build(action: str, params: Any = None, model: str = "") -> Command:
         case "refresh":
             return Command(action, [mqtt.pushall_request()], _full_report,
                            "Refresh", "Refreshed: full status received", print_control=False,
-                           waiting_for="a full status")
+                           waiting_for="a full status", pushall_midway=False)
         case _:
             raise InvalidCommand(f"Unknown action: {action}")

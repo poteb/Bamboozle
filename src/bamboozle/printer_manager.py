@@ -84,10 +84,6 @@ class _Waiter:
     def __init__(self, command: commands.Command, future: asyncio.Future):
         self.command = command
         self.future = future
-        # The printer's echo of the first request (for the light, the
-        # chamber_light one: printers without chamber_light2 may refuse that).
-        (body,) = command.requests[0].values()
-        self.echo = (str(body.get("command", "")), str(body.get("sequence_id", "")))
         self.refused: Frame | None = None  # the printer's own "failed" echo
 
 
@@ -408,7 +404,7 @@ class PrinterConnection:
 
         A connect in progress, or a session that was up (or started) within
         the grace period, does not count as offline yet - paho may still be
-        handshaking or reconnecting by itself.
+        handshaking (it retries a session's first connection by itself).
         """
         if self._connecting:
             return False
@@ -517,7 +513,7 @@ class PrinterConnection:
                 return CommandResult(False, "Not sent: printer not connected")
             if await self._confirmed_within(waiter, self.COMMAND_CONFIRM_SECONDS / 2):
                 return CommandResult(True, command.done, True)
-            if command.action != "refresh":
+            if command.pushall_midway:
                 await self._pushall()  # the full report shows what a delta may not
             if await self._confirmed_within(waiter, self.COMMAND_CONFIRM_SECONDS / 2):
                 return CommandResult(True, command.done, True)
@@ -545,6 +541,7 @@ class PrinterConnection:
             return False
 
     def _publish_all(self, requests: list[dict]) -> bool:
+        # A list, not a generator: every request is tried even if one fails.
         return all([mqtt.publish(self.client, request) for request in requests])
 
     def _watch(self, command: commands.Command) -> _Waiter:
@@ -571,7 +568,7 @@ class PrinterConnection:
             elif self._confirms(waiter, frame):
                 waiter.future.set_result(True)
                 self._waiters.discard(waiter)
-            elif ((frame.command, frame.sequence_id) == waiter.echo
+            elif ((frame.command, frame.sequence_id) == waiter.command.echo
                   and frame.result in ("fail", "failed")):
                 waiter.refused = frame  # only counts if the state never confirms
 
@@ -1135,7 +1132,7 @@ class PrinterManager:
         if not conn:
             return CommandResult(False, "Printer not found")
         try:
-            command = commands.build(action, params, conn.cfg.model)
+            command = commands.build(action, params)
         except commands.InvalidCommand as e:
             return CommandResult(False, str(e))
         if not conn._connected:

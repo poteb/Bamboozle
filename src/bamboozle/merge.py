@@ -184,10 +184,7 @@ def _apply_exist_bits(state_ams: dict, frame_ams: dict) -> None:
         if uid not in _BITS_UNITS or not isinstance(trays, list):
             continue
         for pos, tray in enumerate(trays):
-            slot = _unit_id(tray)
-            if slot is None or not 0 <= slot < _SLOTS_PER_UNIT:
-                continue
-            if not tray_bits >> (uid * _SLOTS_PER_UNIT + slot) & 1:
+            if _bit(tray_bits, uid, _unit_id(tray)) == 0:
                 trays[pos] = {"id": tray["id"]}
 
 

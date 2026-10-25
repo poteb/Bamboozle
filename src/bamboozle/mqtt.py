@@ -180,6 +180,13 @@ class BambuClient:
         except Exception:
             return False
 
+    def publish(self, payload: dict) -> bool:
+        """Queue one request (QoS 1); False while the session is down."""
+        if not self.is_connected():
+            return False
+        info = self._paho.publish(self.request_topic, json.dumps(payload), qos=REQUEST_QOS)
+        return info.rc == 0
+
     # --- paho callbacks (network thread) ----------------------------------------
 
     def _on_connect(self, client, userdata, flags, reason_code, properties=None) -> None:
@@ -221,15 +228,11 @@ class BambuClient:
 def publish(client: BambuClient, payload: dict) -> bool:
     """Queue one request for the printer (QoS 1); never waits for delivery.
 
-    Nothing is queued while the session is down: paho would replay a QoS 1
-    request on reconnect, long after the user gave up on it. (One sent while
-    up but never acked can still be replayed if paho reconnects by itself;
-    `reset_session` drops it with the old client.)
+    Nothing is queued while the session is down: the request would sit in
+    paho's queue for a session that never comes back (clients don't
+    reconnect; see the module docstring).
     """
-    if not client.is_connected():
-        return False
-    info = client.paho.publish(client.request_topic, json.dumps(payload), qos=REQUEST_QOS)
-    return info.rc == 0
+    return client.publish(payload)
 
 
 def retire(client: Any) -> threading.Thread | None:
@@ -237,9 +240,10 @@ def retire(client: Any) -> threading.Thread | None:
 
     Callbacks are cleared first (each setter waits at most for a callback
     already running on paho's thread), so a CONNACK still in flight can't
-    resubscribe or report into a connection that has been replaced. The
-    DISCONNECT (which also stops paho's auto-reconnect) and the join of the
-    network thread run on a daemon thread. Returns that thread, or None when
+    resubscribe or report into a connection that has been replaced. (A
+    callback already running isn't waited for; the connection drops reports
+    from a client it has replaced.) The DISCONNECT and the join of the network
+    thread run on a daemon thread. Returns that thread, or None when
     there's no paho client.
     """
     paho_client = getattr(client, "paho", None)
