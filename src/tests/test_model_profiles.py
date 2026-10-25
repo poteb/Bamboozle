@@ -1,7 +1,6 @@
 """Per-model ffmpeg profiles and the printer model stored on PrinterConfig."""
 import asyncio
 import json
-
 from types import SimpleNamespace
 
 import pytest
@@ -12,7 +11,7 @@ from bamboozle.discovery import Announcement, model_info
 from bamboozle.models import AppConfig, PrinterConfig, PrinterUpdateRequest
 from bamboozle.printer_manager import PrinterManager
 from bamboozle.routers import api
-from test_camera import JPEG_A, JPEG_B, FakeFfmpeg, ffmpeg, wait_until  # noqa: F401
+from fakes import JPEG_A, JPEG_B, FakeFfmpeg, wait_until
 
 URL = "rtsps://bblp:x@192.168.0.103:322/streaming/live/1"
 P2S_SERIAL = "22E8BJ610801473"
@@ -45,12 +44,14 @@ def test_low_latency_profile_starts_fast_without_buffering():
     assert "-use_wallclock_as_timestamps" not in opts
 
 
-def test_every_profile_keeps_the_rtsp_basics_and_mjpeg_output():
+def test_every_profile_reads_unbuffered_over_tcp_into_mjpeg():
     for profile in (camera.LOW_LATENCY, camera.TOLERANT):
         cmd = rtsp_command("ffmpeg", URL, profile)
         opts = _input_options(cmd)
         assert opts["-rtsp_transport"] == "tcp"
         assert opts["-tls_verify"] == "0"
+        assert (opts["-fflags"], opts["-flags"], opts["-max_delay"]) == (
+            "nobuffer", "low_delay", "500000")
         assert cmd[cmd.index("-i") + 1] == URL
         assert cmd[-1] == "pipe:1"
         assert cmd[cmd.index("-f") + 1] == "mjpeg"
@@ -79,7 +80,7 @@ def _profile_of(cmd):
 
 
 @pytest.fixture
-def commands(ffmpeg, monkeypatch):  # noqa: F811
+def commands(ffmpeg, monkeypatch):
     """Record each spawned ffmpeg's command line."""
     queue, spawned = ffmpeg
     cmds = []
@@ -90,102 +91,119 @@ def commands(ffmpeg, monkeypatch):  # noqa: F811
         return popen(cmd, **kwargs)
 
     monkeypatch.setattr(camera.subprocess, "Popen", recording_popen)
+    monkeypatch.setattr(CameraStream, "BACKOFF_MIN_SECONDS", 0.05)
     return queue, cmds
 
 
+def _profiles(commands, procs, n, model="", cam=None):
+    """Stream until n ffmpegs were spawned (playing `procs`), return their profiles."""
+    queue, cmds = commands
+    queue.extend(procs)
+    cam = cam or CameraStream("192.168.0.101", "x", 322, model=model)
+    start = len(cmds)
+    cam.start()
+    try:
+        assert wait_until(lambda: len(cmds) >= start + n, timeout=5)
+    finally:
+        cam.stop()
+    return [_profile_of(c) for c in cmds[start : start + n]]
+
+
+def _exits():
+    """An ffmpeg that gives up at once (printer unreachable, busy, no lock)."""
+    return FakeFfmpeg([], returncode=1, stderr=b"Invalid data found")
+
+
+def _moving():
+    return FakeFfmpeg([JPEG_A, JPEG_B])
+
+
+def _frozen():
+    """The first picture, repeated until the watchdog trips."""
+    return FakeFfmpeg([JPEG_A])
+
+
+LL, TOL = camera.LOW_LATENCY, camera.TOLERANT
+
+
 def test_p2s_stream_uses_the_tolerant_profile_from_the_start(commands):
-    queue, cmds = commands
-    queue.append(FakeFfmpeg([JPEG_A, JPEG_B]))
-    cam = CameraStream(P2S_IP, "x", 322, model="N7")
-    cam.start()
-    try:
-        assert wait_until(lambda: cmds)
-    finally:
-        cam.stop()
-    assert _profile_of(cmds[0]) == camera.TOLERANT
+    assert _profiles(commands, [_moving()], 1, model="N7") == [TOL]
 
 
-def test_low_latency_start_that_fails_falls_back_to_the_tolerant_profile(commands):
-    """probesize 32 doesn't lock on every firmware, and an unknown model may be a P2S."""
-    queue, cmds = commands
-    queue.append(FakeFfmpeg([JPEG_A]))  # the first picture, repeated until the watchdog trips
-    cam = CameraStream(P2S_IP, "x", 322)
-    cam.RESPAWN_SECONDS = cam.BACKOFF_MIN_SECONDS = 0.05
-    cam.start()
-    try:
-        assert wait_until(lambda: len(cmds) >= 2, timeout=4)
-    finally:
-        cam.stop()
-    assert [_profile_of(c) for c in cmds[:2]] == [camera.LOW_LATENCY, camera.TOLERANT]
+def test_p2s_failures_keep_the_tolerant_profile(commands):
+    assert _profiles(commands, [_exits(), _exits()], 3, model="N7") == [TOL, TOL, TOL]
+
+
+def test_low_latency_start_that_freezes_falls_back_to_the_tolerant_profile(commands):
+    """An unknown model may be a P2S, whose timestamps freeze the first picture."""
+    assert _profiles(commands, [_frozen()], 2) == [LL, TOL]
 
 
 def test_low_latency_start_without_frames_falls_back_too(commands):
+    """probesize 32 doesn't lock on every firmware."""
+    assert _profiles(commands, [_exits()], 2, model="O1C2") == [LL, TOL]
+
+
+def test_profiles_alternate_while_neither_shows_a_picture(commands):
+    """A printer that was just unreachable or busy mustn't pin the tolerant profile."""
+    procs = [_exits(), _exits(), _moving()]
+    assert _profiles(commands, procs, 3, model="O1C2") == [LL, TOL, LL]
+
+
+def test_tolerant_profile_that_works_is_kept_after_a_drop(commands):
+    first_tolerant = _moving()
     queue, cmds = commands
-    queue.append(FakeFfmpeg([], returncode=1, stderr=b"Invalid data found"))
+    queue.extend([_exits(), first_tolerant, _moving()])
     cam = CameraStream("192.168.0.101", "x", 322, model="O1C2")
-    cam.BACKOFF_MIN_SECONDS = 0.05
     cam.start()
     try:
-        assert wait_until(lambda: len(cmds) >= 2, timeout=4)
+        assert wait_until(lambda: len(cmds) >= 2 and cam._session_pictures >= 2)
+        first_tolerant.kill()  # routine session drop
+        assert wait_until(lambda: len(cmds) >= 3)
     finally:
         cam.stop()
-    assert [_profile_of(c) for c in cmds[:2]] == [camera.LOW_LATENCY, camera.TOLERANT]
+    assert [_profile_of(c) for c in cmds[:3]] == [LL, TOL, TOL]
 
 
-def test_healthy_low_latency_session_keeps_the_profile(commands):
+def test_low_latency_that_showed_a_moving_picture_survives_a_drop(commands):
     queue, cmds = commands
-    first = FakeFfmpeg([JPEG_A, JPEG_B])
-    queue.extend([first, FakeFfmpeg([JPEG_A, JPEG_B])])
+    first = _moving()
+    queue.extend([first, _moving()])
     cam = CameraStream("192.168.0.101", "x", 322, model="O1C2")
     cam.start()
     try:
-        assert wait_until(lambda: cam._session_was_healthy())
+        assert wait_until(lambda: cam._session_pictures >= 2)
         first.kill()  # routine session drop
         assert wait_until(lambda: len(cmds) >= 2)
     finally:
         cam.stop()
-    assert [_profile_of(c) for c in cmds[:2]] == [camera.LOW_LATENCY, camera.LOW_LATENCY]
+    assert [_profile_of(c) for c in cmds[:2]] == [LL, LL]
 
 
-def test_low_latency_that_worked_survives_a_freeze(commands):
+def test_low_latency_that_worked_survives_a_freeze_and_failures(commands):
     """A dead upstream or a still scene after a moving picture isn't a profile problem."""
-    queue, cmds = commands
-    first = FakeFfmpeg([JPEG_A, JPEG_B] + [JPEG_B] * 1000)
-    queue.extend([first, FakeFfmpeg([JPEG_A, JPEG_B])])
-    cam = CameraStream("192.168.0.101", "x", 322, model="O1C2")
-    cam.start()
-    try:
-        assert first.killed.wait(3), "watchdog did not trip"
-        assert wait_until(lambda: len(cmds) >= 2)
-    finally:
-        cam.stop()
-    assert [_profile_of(c) for c in cmds[:2]] == [camera.LOW_LATENCY, camera.LOW_LATENCY]
+    procs = [FakeFfmpeg([JPEG_A, JPEG_B] + [JPEG_B] * 1000), _exits(), _exits()]
+    assert _profiles(commands, procs, 3, model="O1C2") == [LL, LL, LL]
 
 
 def test_restart_tries_the_low_latency_profile_again(commands):
-    queue, cmds = commands
-    queue.extend([FakeFfmpeg([JPEG_A, JPEG_B]), FakeFfmpeg([JPEG_A, JPEG_B])])
-    cam = CameraStream("192.168.0.101", "x", 322)
-    cam._fallback = True
-    cam.start()
-    try:
-        assert wait_until(lambda: cmds)
-    finally:
-        cam.stop()
-    assert _profile_of(cmds[0]) == camera.LOW_LATENCY
+    cam = CameraStream("192.168.0.101", "x", 322, model="O1C2")
+    assert _profiles(commands, [_exits()], 2, cam=cam) == [LL, TOL]
+    assert _profiles(commands, [_moving()], 1, cam=cam) == [LL]
 
 
 def test_model_learned_while_streaming_applies_to_the_next_session():
     cam = CameraStream(P2S_IP, "x", 322)
-    assert cam._session_profile() == camera.LOW_LATENCY
+    assert cam._session_profile() == LL
     cam.model = "N7"
-    assert cam._session_profile() == camera.TOLERANT
+    assert cam._session_profile() == TOL
 
 
 # --- model on PrinterConfig: backfill, relocation, add, edit -----------------------
 
 @pytest.fixture(autouse=True)
 def offline(monkeypatch):
+    """No real MQTT connects from the manager tests."""
     monkeypatch.setattr(discovery, "tcp_reachable", lambda ip, port=8883, timeout=3.0: False)
 
 
@@ -279,21 +297,29 @@ def test_relocation_records_the_announced_model(isolated_appdata, monkeypatch):
     assert _saved(isolated_appdata)["printers"][0]["model"] == "N7"
 
 
-def test_added_printer_takes_its_model_from_discovery(isolated_appdata):
+def _add_after_announcement(ann_ip, added_ip):
     async def scenario():
         mgr = PrinterManager(AppConfig(), discovery_port=None)
         await mgr.start()
-        mgr._on_announcement(Announcement(ip=P2S_IP, serial=P2S_SERIAL, model="N7"))
+        mgr._on_announcement(Announcement(ip=ann_ip, serial=P2S_SERIAL, model="N7"))
         await mgr.add_printer(PrinterConfig(
-            id="p2s", name="P2S", ip=P2S_IP, access_code="x",
+            id="p2s", name="P2S", ip=added_ip, access_code="x",
             serial=P2S_SERIAL.lower(), camera_port=322))
         conn = mgr.get_connection("p2s")
         await mgr.stop()
         return conn
 
-    conn = asyncio.run(scenario())
+    return asyncio.run(scenario())
+
+
+def test_added_printer_takes_its_model_from_discovery(isolated_appdata):
+    conn = _add_after_announcement(P2S_IP, P2S_IP)
     assert (conn.cfg.model, conn.camera.model) == ("N7", "N7")
     assert _saved(isolated_appdata)["printers"][0]["model"] == "N7"
+
+
+def test_added_printer_at_another_ip_does_not_take_the_announced_model():
+    assert _add_after_announcement("192.168.0.250", P2S_IP).cfg.model == ""
 
 
 def _put(mgr, **fields):

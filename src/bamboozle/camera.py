@@ -99,10 +99,11 @@ def jpeg_frames(read: Callable[[int], bytes]) -> Iterator[bytes]:
             buf = buf[eoi + 2 :]
 
 
-# ffmpeg input profiles for the RTSPS camera (port 322).
+# ffmpeg input profiles for the RTSPS camera (port 322). Every profile reads
+# without input buffering (`-fflags nobuffer -flags low_delay`); they differ
+# in how they probe the stream.
 #
-# LOW_LATENCY (default): a tiny probe so the stream starts at once, and no
-# input buffering.
+# LOW_LATENCY (default): a tiny probe so the stream starts at once.
 # TOLERANT (P2S): P2S RTP timestamps don't advance, so the `-r` rate
 # conversion would drop every frame after the first. Stamp packets with the
 # arrival time instead, and probe long enough to lock onto the stream. It is
@@ -202,10 +203,12 @@ class CameraStream:
     hammered. A session that delivered no frames also clears the picture.
 
     RTSP sessions use the ffmpeg profile for `model` (the SSDP DevModel code,
-    which may be learned while streaming). Until a LOW_LATENCY session has
-    shown a moving picture, one that was unhealthy or froze switches the run
-    to TOLERANT until the next start(). Once LOW_LATENCY has worked, routine
-    drops and still scenes keep it.
+    which may be learned while streaming). For a LOW_LATENCY model, until
+    LOW_LATENCY has shown a moving picture (2+ distinct frames) this run, a
+    LOW_LATENCY session that was unhealthy or froze switches to TOLERANT, and
+    a TOLERANT session without a moving picture switches back, since the
+    printer may just have been unreachable or busy. Once LOW_LATENCY has
+    worked, routine drops and still scenes keep it.
     """
 
     HEALTHY_SESSION_SECONDS = 10.0
@@ -231,6 +234,7 @@ class CameraStream:
         # whether LOW_LATENCY has delivered a moving picture.
         self._fallback = False
         self._low_latency_works = False
+        self._profile = LOW_LATENCY  # the current session's
         self._frame: bytes | None = None
         self._frame_at = 0.0
         self._lock = threading.Lock()
@@ -318,6 +322,21 @@ class CameraStream:
     def _session_profile(self) -> str:
         return TOLERANT if self._fallback else rtsp_profile(self.model)
 
+    def _choose_fallback(self, profile: str, healthy: bool) -> None:
+        """After an RTSP session, decide whether the next one falls back to TOLERANT."""
+        if self._port != 322 or rtsp_profile(self.model) != LOW_LATENCY:
+            return
+        moving = self._session_pictures >= 2
+        if profile == LOW_LATENCY:
+            if moving:
+                self._low_latency_works = True
+            elif not self._low_latency_works and (not healthy or self._session_froze):
+                logger.info("Camera %s: trying the tolerant ffmpeg profile", self._ip)
+                self._fallback = True
+        elif not moving:
+            logger.info("Camera %s: trying the low-latency ffmpeg profile again", self._ip)
+            self._fallback = False
+
     def _wait(self, seconds: float) -> None:
         self._stopped.wait(seconds)
 
@@ -345,7 +364,7 @@ class CameraStream:
             self._session_froze = False
             self._session_pictures = 0
             self._session_last_frame = None
-            profile = self._session_profile()
+            self._profile = profile = self._session_profile()
             try:
                 self._capture_session()
             except Exception as e:
@@ -355,11 +374,7 @@ class CameraStream:
                 break
 
             healthy = self._session_was_healthy()
-            if self._port == 322 and profile == LOW_LATENCY:
-                self._low_latency_works |= self._session_pictures >= 2
-                if not self._low_latency_works and (not healthy or self._session_froze):
-                    logger.info("Camera %s: switching to the tolerant ffmpeg profile", self._ip)
-                    self._fallback = True
+            self._choose_fallback(profile, healthy)
             if healthy:
                 backoff = self.BACKOFF_MIN_SECONDS
                 delay = self.RESPAWN_SECONDS
@@ -453,7 +468,7 @@ class CameraStream:
             return
 
         url = f"rtsps://bblp:{self._access_code}@{self._ip}:{self._port}/streaming/live/1"
-        profile = self._session_profile()
+        profile = self._profile
         proc = subprocess.Popen(
             rtsp_command(ffmpeg, url, profile),
             stdout=subprocess.PIPE,

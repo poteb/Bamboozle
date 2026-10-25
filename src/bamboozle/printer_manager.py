@@ -871,7 +871,7 @@ class PrinterManager:
         logger.info("PrinterManager stopped")
 
     async def add_printer(self, cfg: PrinterConfig) -> None:
-        cfg.model = cfg.model or self._announced_model(cfg.serial)
+        cfg.model = cfg.model or self._announced_model(cfg)
         conn = PrinterConnection(cfg)
         self._connections[cfg.id] = conn
         self._config.printers.append(cfg)
@@ -910,7 +910,7 @@ class PrinterManager:
                 "Failed to back up printer config for %s: %s", conn.cfg.name, e
             )
         await conn.disconnect()
-        cfg.model = cfg.model or self._announced_model(cfg.serial)
+        cfg.model = cfg.model or self._announced_model(cfg)
         new_conn = PrinterConnection(cfg)
         self._connections[printer_id] = new_conn
         self._config.printers = [
@@ -974,10 +974,15 @@ class PrinterManager:
                 p.model = ann.model
         save_config(self._config)
 
-    def _announced_model(self, serial: str) -> str:
-        """The model a printer with this serial last announced, or ""."""
-        entry = self._discovered.get(serial.upper())
-        return entry[0].model if entry else ""
+    def _announced_model(self, cfg: PrinterConfig) -> str:
+        """The model the printer recently announced from cfg's IP, or ""."""
+        entry = self._discovered.get(cfg.serial.upper())
+        if entry is None:
+            return ""
+        ann, seen = entry
+        if ann.ip != cfg.ip or time.monotonic() - seen >= self.DISCOVERY_TTL_SECONDS:
+            return ""
+        return ann.model
 
     async def handle_announcement(self, ann: discovery.Announcement) -> None:
         """Follow a configured printer to the IP it just announced.
