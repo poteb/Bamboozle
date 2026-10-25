@@ -44,6 +44,10 @@ FETCH_TIMEOUT_SECONDS = 20
 REFRESH_SECONDS = 7 * 86400
 RETRY_MIN_SECONDS = 10 * 60  # after a failed fetch; doubles ...
 RETRY_MAX_SECONDS = 6 * 3600  # ... up to this
+# An empty answer (`result: 201`, or no entries) is asked again after this,
+# not a week: it may be a hiccup on Bambu's side.
+EMPTY_RETRY_SECONDS = 86400
+_READ_CHUNK = 64 * 1024
 CHECK_SECONDS = 60           # how often the refresh loop looks for work
 
 NO_TEXT = "No description from Bambu (internal code)"
@@ -78,13 +82,20 @@ def _url(prefix: str) -> str:
 
 
 def _http_get(url: str, timeout: float, max_bytes: int) -> bytes:
-    """GET the body; raises on an error status or a body over `max_bytes`."""
+    """GET the body; raises on an error status, a body over `max_bytes`, or a
+    download still going after `timeout` (urllib's own timeout is per socket
+    operation, so a trickle would never trip it)."""
+    deadline = time.monotonic() + timeout
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    data = bytearray()
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = resp.read(max_bytes + 1)
-    if len(data) > max_bytes:
-        raise ValueError(f"catalogue over {max_bytes} bytes")
-    return data
+        while chunk := resp.read(_READ_CHUNK):
+            data += chunk
+            if len(data) > max_bytes:
+                raise ValueError(f"catalogue over {max_bytes} bytes")
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"catalogue download over {timeout} s")
+    return bytes(data)
 
 
 http_get = _http_get  # the network adapter (tests replace it)
@@ -275,12 +286,14 @@ class HmsCatalog:
         """Load the cache, then fetch each catalogue that's missing or stale:
         the generic one and one per printer model."""
         prefixes = [""] + sorted({p for p in map(serial_prefix, serials) if p})
+        # Every cache first: a slow fetch mustn't hold back another's text.
         for prefix in prefixes:
             if prefix not in self._loaded:
                 self._loaded.add(prefix)
                 entry = await asyncio.to_thread(_load, prefix)
                 if entry:
                     self._store(prefix, entry)
+        for prefix in prefixes:
             if self._due(prefix):
                 await self._fetch(prefix)
 
@@ -300,7 +313,18 @@ class HmsCatalog:
             return
         self._failures.pop(prefix, None)
         self._retry_at.pop(prefix, None)
-        entry = _Entry(time.time(), tables)
+        fetched_at = time.time()
+        if not tables.hms and not tables.error:
+            with self._lock:
+                cached = self._entries.get(prefix)
+            if cached and (cached.tables.hms or cached.tables.error):
+                # Never trade a catalogue for nothing; ask again tomorrow.
+                self._retry_at[prefix] = time.monotonic() + EMPTY_RETRY_SECONDS
+                logger.info("The %s HMS catalogue came back empty; keeping the cached one", name)
+                return
+            # Kept (so it isn't fetched every round), but due again in a day.
+            fetched_at -= REFRESH_SECONDS - EMPTY_RETRY_SECONDS
+        entry = _Entry(fetched_at, tables)
         self._store(prefix, entry)
         await asyncio.to_thread(_save, prefix, entry)
         logger.info("HMS catalogue %s: %d messages, %d print errors",

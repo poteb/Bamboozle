@@ -908,10 +908,7 @@ class BamboozleApp {
             + `<div class="card-notice-detail" aria-live="off">${this.esc(notice.title)}</div></details>`;
     }
 
-    // One HMS message / print error: "Warning · AMS 2 · <code linked to Bambu's
-    // wiki>", then our description when we have one. The text is Bambu's
-    // (not bundled), so the code links to it.
-    // One message. With a description: "Warning · <text>", then the module
+    // One HMS message / print error. With a description: "Warning · <text>", then the module
     // and linked code as small secondary text. The text itself is left out
     // (an empty .error-text) and set with textContent by applyErrors: it's
     // Bambu's catalogue text, downloaded at runtime. Without one, the line is
@@ -931,16 +928,16 @@ class BamboozleApp {
             + `<div class="error-meta">${where}${codeHtml}</div></div>`;
     }
 
-    // Inner HTML of the card's error area. Active errors (why the job is
-    // paused or failed) are a prominent block; the rest are lingering messages
-    // the printer keeps until they're acknowledged on it, so they sit in a
-    // quiet collapsed line instead of looking like a current fault.
     // The errors in display order: active, then lingering (server order within).
     _errorGroups(s) {
         if (!s.online || !Array.isArray(s.errors)) return { active: [], lingering: [] };
         return { active: s.errors.filter((e) => e.active), lingering: s.errors.filter((e) => !e.active) };
     }
 
+    // Inner HTML of the card's error area. Active errors (why the job is
+    // paused or failed) are a prominent block; the rest are lingering messages
+    // the printer keeps until they're acknowledged on it, so they sit in a
+    // quiet collapsed line instead of looking like a current fault.
     errorsHtml(s) {
         const { active, lingering } = this._errorGroups(s);
         let html = '';

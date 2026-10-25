@@ -876,13 +876,13 @@ class PrinterManager:
             self._listener.stop()
             self._listener = None
         self._listening = False
-        await hms_catalog.CATALOG.stop()
         if self._poll_task:  # first, so it can't spawn more reconnects
             self._poll_task.cancel()
             try:
                 await self._poll_task
             except asyncio.CancelledError:
                 pass
+        await hms_catalog.CATALOG.stop()
         tasks = list(self._tasks)
         for task in tasks:
             task.cancel()

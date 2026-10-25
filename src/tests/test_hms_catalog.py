@@ -229,7 +229,9 @@ def test_http_get_refuses_an_oversized_body(monkeypatch):
     class Resp:
         status = 200
         def __init__(self): self.data = b"x" * 101
-        def read(self, n=-1): return self.data[:n] if n >= 0 else self.data
+        def read(self, n):
+            chunk, self.data = self.data[:n], self.data[n:]
+            return chunk
         def __enter__(self): return self
         def __exit__(self, *a): return False
     seen = {}
@@ -360,3 +362,71 @@ def test_the_manager_refreshes_the_catalogue_for_its_printers_in_the_background(
     assert asyncio.run(scenario()) is False
     assert sorted(http.urls) == ["https://e.bambulab.com/query.php?lang=en",
                                  "https://e.bambulab.com/query.php?lang=en&d=31B"]
+
+
+# --- Review fixes ------------------------------------------------------------------
+
+def test_every_cache_file_is_loaded_before_any_fetch(http, monkeypatch):
+    """A slow fetch mustn't delay the cached text of the next model."""
+    refreshed([H2C_SERIAL])  # caches generic + 31B
+    age_cache(hms_catalog.REFRESH_SECONDS + 1)  # both due again
+    catalog = hms_catalog.HmsCatalog()
+    seen = []
+
+    def fetch_and_look(url, timeout, max_bytes):
+        # When the generic refetch starts, the H2C cache is already loaded.
+        seen.append(catalog._lookup("hms", "0500060000020001", "31B"))
+        raise OSError("slow and then offline")
+    monkeypatch.setattr(hms_catalog, "http_get", fetch_and_look)
+    asyncio.run(catalog.refresh([H2C_SERIAL]))
+    assert seen[0] == "H2C camera text."
+
+
+@pytest.mark.parametrize("empty", [
+    b'{"result":201,"t":1,"ver":0,"msg":""}',
+    body(),  # result 0, empty lists
+])
+def test_an_empty_answer_never_replaces_a_cached_catalogue(http, empty, monkeypatch):
+    refreshed([H2C_SERIAL])
+    age_cache(hms_catalog.REFRESH_SECONDS + 1)
+    http.bodies["31B"] = empty
+    catalog = refreshed([H2C_SERIAL])
+    [e] = described(catalog, H2C_SERIAL, CAMERA_GONE)
+    assert e.description == "H2C camera text."
+    saved = json.loads(open(os.path.join(cache_dir(), "en-31B.json"), encoding="utf-8").read())
+    assert saved["hms"]  # the file wasn't overwritten either
+    # ... and it's asked again sooner than a week, not on every round.
+    http.urls.clear()
+    asyncio.run(catalog.refresh([H2C_SERIAL]))
+    assert not any("d=31B" in u for u in http.urls)
+    now = time.monotonic()
+    monkeypatch.setattr(hms_catalog.time, "monotonic", lambda: now + hms_catalog.EMPTY_RETRY_SECONDS + 1)
+    asyncio.run(catalog.refresh([H2C_SERIAL]))
+    assert any("d=31B" in u for u in http.urls)
+
+
+def test_an_empty_answer_with_nothing_cached_is_kept_but_asked_again_within_a_day(http, monkeypatch):
+    http.bodies["22E"] = b'{"result":201,"t":1,"ver":0,"msg":""}'
+    catalog = refreshed([P2S_SERIAL])
+    http.urls.clear()
+    asyncio.run(catalog.refresh([P2S_SERIAL]))
+    assert http.urls == []
+    real = time.time()
+    monkeypatch.setattr(hms_catalog.time, "time", lambda: real + hms_catalog.EMPTY_RETRY_SECONDS + 1)
+    asyncio.run(catalog.refresh([P2S_SERIAL]))
+    assert http.urls == ["https://e.bambulab.com/query.php?lang=en&d=22E"]
+
+
+def test_http_get_gives_up_after_an_overall_deadline(monkeypatch):
+    clock = [0.0]
+
+    class SlowResp:
+        def read(self, n=-1):
+            clock[0] += 3  # each chunk arrives just inside the socket timeout
+            return b"x" * 10
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    monkeypatch.setattr(hms_catalog.urllib.request, "urlopen", lambda req, timeout: SlowResp())
+    monkeypatch.setattr(hms_catalog.time, "monotonic", lambda: clock[0])
+    with pytest.raises(TimeoutError):
+        hms_catalog._http_get("https://e.bambulab.com/query.php?lang=en", timeout=5, max_bytes=10_000)
