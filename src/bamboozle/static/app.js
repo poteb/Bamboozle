@@ -221,6 +221,8 @@ class BamboozleApp {
             this.render();
         } else if (msg.type === 'command_result') {
             this.showToast(msg.message, msg.success ? 'success' : 'error');
+        } else if (msg.type === 'notice') {
+            this.showToast(msg.message, msg.level || 'info');
         }
     }
 

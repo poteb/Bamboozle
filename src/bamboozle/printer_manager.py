@@ -11,6 +11,7 @@ from typing import Any
 import bambulabs_api as bl
 from fastapi import WebSocket
 
+from . import discovery
 from .camera import CameraStream
 from .config import _config_dir, save_config
 from .models import AppConfig, Filament, PrinterConfig, PrinterState
@@ -48,8 +49,16 @@ class PrinterConnection:
         self._thumb_fetched_for: str = ""  # gcode_file we fetched thumbnail for
         self._backoff = 3.0
         self._connected = False
+        self._connecting = False
 
     async def connect(self) -> bool:
+        reachable = await asyncio.to_thread(
+            discovery.tcp_reachable, self.cfg.ip, discovery.MQTT_PORT
+        )
+        if not reachable:
+            logger.warning("%s: printer unreachable at %s", self.cfg.name, self.cfg.ip)
+            self._connected = False
+            return False
         try:
             await asyncio.wait_for(
                 asyncio.to_thread(self.printer.mqtt_start), timeout=10
@@ -77,7 +86,20 @@ class PrinterConnection:
             logger.debug("Error disconnecting %s: %s", self.cfg.name, e)
         self._connected = False
 
+    def is_healthy(self) -> bool:
+        """True while the MQTT session to the saved IP is up."""
+        try:
+            return self._connected and self.printer.mqtt_client.is_connected()
+        except Exception:
+            return False
+
     async def read_state(self) -> PrinterState:
+        if not self._connected:
+            # Never started MQTT (e.g. unreachable) - don't poke the library
+            # getters, they'd only log "Printer Values Not Available Yet".
+            self.state.online = False
+            self.state.timestamp = time.time()
+            return self.state
         try:
             state_data = await asyncio.to_thread(self._read_sync)
             self.state = state_data
@@ -466,12 +488,22 @@ class PrinterConnection:
 class PrinterManager:
     """Manages all printer connections, polling, and WebSocket broadcasting."""
 
-    def __init__(self, config: AppConfig):
+    # How long to ignore an announced IP whose cert didn't match the serial.
+    RELOCATE_RETRY_SECONDS = 60.0
+
+    def __init__(
+        self, config: AppConfig, discovery_port: int | None = discovery.SSDP_PORT
+    ):
         self._config = config
         self._connections: dict[str, PrinterConnection] = {}
         self._ws_clients: set[WebSocket] = set()
         self._poll_task: asyncio.Task | None = None
         self._prev_states: dict[str, dict] = {}
+        self._discovery_port = discovery_port
+        self._listener: discovery.SsdpListener | None = None
+        self._relocating: set[str] = set()
+        self._rejected: dict[tuple[str, str], float] = {}  # (serial, ip) -> time
+        self._tasks: set[asyncio.Task] = set()
 
     @property
     def config(self) -> AppConfig:
@@ -483,11 +515,21 @@ class PrinterManager:
             self._connections[cfg.id] = conn
         # Connect all printers in background (don't block startup)
         for pid in list(self._connections):
-            asyncio.create_task(self._connect_printer(pid))
+            self._spawn(self._connect_printer(pid))
         self._poll_task = asyncio.create_task(self._poll_loop())
+        if self._discovery_port is not None:
+            self._listener = discovery.SsdpListener(
+                self._on_announcement, port=self._discovery_port
+            )
+            await self._listener.start()
         logger.info("PrinterManager started with %d printers", len(self._connections))
 
     async def stop(self) -> None:
+        if self._listener:
+            self._listener.stop()
+            self._listener = None
+        for task in list(self._tasks):
+            task.cancel()
         if self._poll_task:
             self._poll_task.cancel()
             try:
@@ -504,7 +546,7 @@ class PrinterManager:
         self._config.printers.append(cfg)
         save_config(self._config)
         # Connect in background so the API response returns immediately
-        asyncio.create_task(self._connect_printer(cfg.id))
+        self._spawn(self._connect_printer(cfg.id))
 
     async def remove_printer(self, printer_id: str) -> bool:
         conn = self._connections.pop(printer_id, None)
@@ -544,17 +586,84 @@ class PrinterManager:
         ]
         save_config(self._config)
         # Reconnect in background
-        asyncio.create_task(self._connect_printer(printer_id))
+        self._spawn(self._connect_printer(printer_id))
         return True
 
     async def _connect_printer(self, printer_id: str) -> None:
         conn = self._connections.get(printer_id)
-        if conn:
+        if not conn or conn._connecting:
+            return
+        conn._connecting = True
+        try:
             ok = await conn.connect()
-            if ok:
-                logger.info("Printer %s connected successfully", conn.cfg.name)
-            else:
-                logger.warning("Printer %s failed to connect, will retry", conn.cfg.name)
+        finally:
+            conn._connecting = False
+        if self._connections.get(printer_id) is not conn:
+            # Replaced (edited / relocated) while we were connecting.
+            await conn.disconnect()
+            return
+        if ok:
+            logger.info("Printer %s connected successfully", conn.cfg.name)
+        else:
+            logger.warning("Printer %s failed to connect, will retry", conn.cfg.name)
+
+    def _spawn(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    # --- IP auto-detect -----------------------------------------------------
+
+    def _on_announcement(self, ann: discovery.Announcement) -> None:
+        self._spawn(self.handle_announcement(ann))
+
+    async def handle_announcement(self, ann: discovery.Announcement) -> None:
+        """Follow a configured printer to the IP it just announced.
+
+        Only acts when the printer is offline at its saved IP, and only after
+        the TLS cert at the new IP proves it is the same printer (CN == serial).
+        """
+        serial = ann.serial.upper()
+        conn = next(
+            (c for c in self._connections.values() if c.cfg.serial.upper() == serial),
+            None,
+        )
+        if conn is None or conn.cfg.ip == ann.ip or conn.is_healthy():
+            return
+        printer_id = conn.cfg.id
+        key = (serial, ann.ip)
+        rejected_at = self._rejected.get(key)
+        if rejected_at and time.monotonic() - rejected_at < self.RELOCATE_RETRY_SECONDS:
+            return
+        if printer_id in self._relocating:
+            return
+        self._relocating.add(printer_id)
+        try:
+            cn = await asyncio.to_thread(
+                discovery.fetch_cert_common_name, ann.ip, discovery.MQTT_PORT
+            )
+            if (cn or "").upper() != serial:
+                self._rejected[key] = time.monotonic()
+                logger.warning(
+                    "%s announced at %s but its certificate CN is %r, not %s; ignoring",
+                    conn.cfg.name, ann.ip, cn, conn.cfg.serial,
+                )
+                return
+            # Re-check: the connection may have recovered or been edited meanwhile.
+            current = self._connections.get(printer_id)
+            if current is not conn or conn.is_healthy():
+                return
+            old_ip = conn.cfg.ip
+            new_cfg = conn.cfg.model_copy(update={"ip": ann.ip})
+            await self.update_printer(printer_id, new_cfg)
+            logger.info("%s moved from %s to %s", new_cfg.name, old_ip, ann.ip)
+            await self._broadcast({
+                "type": "notice",
+                "level": "info",
+                "message": f"{new_cfg.name} moved to {ann.ip}",
+            })
+        finally:
+            self._relocating.discard(printer_id)
 
     def get_connection(self, printer_id: str) -> PrinterConnection | None:
         return self._connections.get(printer_id)
@@ -578,10 +687,11 @@ class PrinterManager:
                 await asyncio.sleep(self._config.poll_interval)
                 states: dict[str, Any] = {}
                 for pid, conn in list(self._connections.items()):
-                    # Auto-reconnect disconnected printers
-                    if not conn._connected:
+                    # Auto-reconnect disconnected printers in the background so
+                    # an unreachable one can't stall updates for the rest.
+                    if not conn._connected and not conn._connecting:
                         logger.info("Attempting reconnect for %s", conn.cfg.name)
-                        await conn.connect()
+                        self._spawn(self._connect_printer(pid))
 
                     state = await conn.read_state()
                     state_dict = state.model_dump(mode="json")

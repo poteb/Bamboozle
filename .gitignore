@@ -2,3 +2,5 @@
 src/s.png
 
 src/bamboozle/__pycache__/
+__pycache__/
+.pytest_cache/
