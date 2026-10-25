@@ -21,7 +21,6 @@ class FakeMqtt:
 def lan(monkeypatch):
     monkeypatch.setattr(discovery, "tcp_reachable", lambda ip, port=8883, timeout=3.0: True)
     monkeypatch.setattr(bl.Printer, "mqtt_start", lambda self: None)
-    monkeypatch.setattr(bl.Printer, "mqtt_stop", lambda self: None)
     monkeypatch.setattr(PrinterConnection, "MQTT_SETTLE_SECONDS", 0)
     monkeypatch.setattr(PrinterConnection, "MQTT_GRACE_SECONDS", 0.2)
 

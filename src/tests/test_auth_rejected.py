@@ -7,7 +7,7 @@ import pytest
 from paho.mqtt.packettypes import PacketTypes
 from paho.mqtt.reasoncodes import ReasonCode
 
-from bamboozle import discovery, protocol
+from bamboozle import discovery, mqtt, protocol
 from bamboozle.models import PrinterAddRequest, PrinterConfig
 from bamboozle.printer_manager import PrinterConnection
 from bamboozle.routers import api
@@ -28,7 +28,6 @@ def connack(printer, rc):
 @pytest.fixture
 def lan(monkeypatch):
     monkeypatch.setattr(discovery, "tcp_reachable", lambda ip, port=8883, timeout=3.0: True)
-    monkeypatch.setattr(bl.Printer, "mqtt_stop", lambda self: None)
     monkeypatch.setattr(PrinterConnection, "MQTT_SETTLE_SECONDS", 0)
 
 
@@ -122,7 +121,7 @@ def test_retry_does_not_act_on_the_previous_attempts_refusal(lan, monkeypatch):
             connack(self, rc)
 
     monkeypatch.setattr(bl.Printer, "mqtt_start", start)
-    monkeypatch.setattr(bl.Printer, "mqtt_stop", lambda self: stops.append(1))
+    monkeypatch.setattr(mqtt, "retire", lambda printer: stops.append(1))
     monkeypatch.setattr(PrinterConnection, "MQTT_GRACE_SECONDS", 60)
     conn = _conn()
 

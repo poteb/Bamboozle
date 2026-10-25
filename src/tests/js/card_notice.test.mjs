@@ -54,3 +54,19 @@ test('a stale commands_blocked flag is not shown while the printer is offline', 
 test('a printer from an older server without the new fields has no notice', () => {
     assert.equal(app.cardNotice({ online: true }), null);
 });
+
+test('a session that never got a report points at the serial', () => {
+    const n = app.cardNotice(printer({ online: false, last_error: 'no_reports' }));
+    assert.match(n.text, /serial/i);
+    assert.match(n.text, /Settings/);
+});
+
+test('a session whose reports stopped says it is reconnecting', () => {
+    const n = app.cardNotice(printer({ online: false, last_error: 'stale' }));
+    assert.match(n.text, /no data|no report/i);
+    assert.match(n.text, /reconnect/i);
+});
+
+test('a silence reason left over on an online printer is not shown', () => {
+    assert.equal(app.cardNotice(printer({ last_error: 'stale' })), null);
+});

@@ -31,6 +31,12 @@ AUTH_REJECTED_MESSAGE = (
     "Developer Mode is toggled on the printer)"
 )
 
+# Why a session that logged in was dropped. The report topic is
+# `device/<serial>/report` and is case-sensitive, so a session that never gets
+# a single report usually means a wrong (or wrongly cased) serial.
+NO_REPORTS = "no_reports"
+STALE = "stale"  # reports stopped (P1-series brokers can go silent, socket up)
+
 
 def _hex_or_int(value: Any) -> int | None:
     """Ints pass through; strings are read as hex. Anything else is None."""

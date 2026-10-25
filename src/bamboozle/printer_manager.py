@@ -11,7 +11,7 @@ from typing import Any
 import bambulabs_api as bl
 from fastapi import WebSocket
 
-from . import discovery, protocol
+from . import discovery, mqtt, protocol
 from .camera import CameraStream
 from .config import _config_dir, save_config
 from .models import AppConfig, Filament, PrinterConfig, PrinterState
@@ -44,11 +44,15 @@ class PrinterConnection:
     MQTT_SETTLE_SECONDS = 2.0  # give MQTT a moment to establish after start
     # How long a started session may stay not-connected before it counts as down.
     MQTT_GRACE_SECONDS = 20.0
+    # A connected session without a report for this long counts as down.
+    STALE_SECONDS = 60.0
+    # ...and one this quiet is first asked for a full report (an idle printer
+    # may push rarely).
+    PROBE_SECONDS = 30.0
 
     def __init__(self, cfg: PrinterConfig):
         self.cfg = cfg
         self.cfg.camera_enabled = False  # Always start with cameras off
-        self.printer = bl.Printer(cfg.ip, cfg.access_code, cfg.serial)
         self.camera = CameraStream(cfg.ip, cfg.access_code, cfg.camera_port)
         self.state = PrinterState(printer_id=cfg.id, name=cfg.name, sort=cfg.sort)
         self.thumbnail: bytes | None = None
@@ -64,7 +68,29 @@ class PrinterConnection:
         # Whether the current connect attempt's login was accepted or refused
         # yet, so a retry doesn't act on the previous attempt's refusal.
         self._login_answered = False
-        self.printer.mqtt_client.on_connect_handler = self._on_mqtt_connack
+        # Reports on the current session; set from paho's thread.
+        self._session_started = 0.0  # monotonic
+        self._last_report = 0.0  # monotonic; 0 = none yet this session
+        self._reports = 0
+        self._probed = False  # pushall sent for the current quiet spell
+        # Why the last session was dropped for silence (protocol.NO_REPORTS /
+        # STALE); kept until a report arrives or the printer stops answering.
+        self._down_reason = ""
+        self.printer = self._new_printer()
+
+    def _new_printer(self) -> bl.Printer:
+        """A fresh library client, wired to this connection."""
+        printer = bl.Printer(self.cfg.ip, self.cfg.access_code, self.cfg.serial)
+        printer.mqtt_client.on_connect_handler = self._on_mqtt_connack
+        printer.mqtt_client.on_message_handler = self._on_mqtt_message
+        mqtt.configure(printer)
+        return printer
+
+    def _on_mqtt_message(self, _mqtt, _client, _userdata, _msg) -> None:
+        self._last_report = time.monotonic()
+        self._reports += 1
+        self._probed = False
+        self._down_reason = ""
 
     def _on_mqtt_connack(self, _mqtt, _client, _userdata, _flags, rc, _props) -> None:
         # _login_answered is set last, so _login_refused() never pairs a new
@@ -102,9 +128,14 @@ class PrinterConnection:
         if not reachable:
             logger.warning("%s: printer unreachable at %s", self.cfg.name, self.cfg.ip)
             self._auth_rejected = False  # says nothing about the code any more
+            self._down_reason = ""  # ...or about the serial
             self._schedule_retry()
             return False
         self._login_answered = False
+        self._reports = 0
+        self._last_report = 0.0
+        self._probed = False
+        self._session_started = time.monotonic()
         try:
             await asyncio.wait_for(
                 asyncio.to_thread(self.printer.mqtt_start), timeout=10
@@ -146,12 +177,44 @@ class PrinterConnection:
         )
 
     async def disconnect(self) -> None:
+        """Stop the camera and end the MQTT session. Never waits on paho."""
         try:
             self.camera.stop()
-            await asyncio.to_thread(self.printer.mqtt_stop)
         except Exception as e:
-            logger.debug("Error disconnecting %s: %s", self.cfg.name, e)
+            logger.debug("Error stopping camera for %s: %s", self.cfg.name, e)
+        mqtt.retire(self.printer)
         self._connected = False
+
+    def _silence(self) -> float:
+        """Seconds since the last report (or the session start, if none)."""
+        return time.monotonic() - (self._last_report or self._session_started)
+
+    async def check_silence(self) -> None:
+        """Ask a quiet session for a full report; past STALE_SECONDS, record
+        why it is about to be dropped."""
+        if not self._connected or self._connecting:
+            return
+        silence = self._silence()
+        if silence >= self.STALE_SECONDS:
+            reason = protocol.STALE if self._reports else protocol.NO_REPORTS
+            if reason != self._down_reason:
+                if reason == protocol.NO_REPORTS:
+                    logger.warning(
+                        "%s: connected to %s but no report in %.0fs since connect: "
+                        "check the serial (%s; it is case-sensitive)",
+                        self.cfg.name, self.cfg.ip, silence, self.cfg.serial,
+                    )
+                else:
+                    logger.warning(
+                        "%s: no report from %s for %.0fs", self.cfg.name, self.cfg.ip, silence
+                    )
+            self._down_reason = reason
+        elif silence >= self.PROBE_SECONDS and not self._probed:
+            self._probed = True
+            try:
+                await asyncio.to_thread(mqtt.publish, self.printer, mqtt.pushall_request())
+            except Exception as e:
+                logger.debug("pushall probe failed for %s: %s", self.cfg.name, e)
 
     def is_offline(self) -> bool:
         """True when the printer is known to be down at its saved IP.
@@ -164,10 +227,13 @@ class PrinterConnection:
             return False
         if not self._connected or self._login_refused():
             return True  # a refused code won't fix itself; don't wait out the grace
+        if self._silence() >= self.STALE_SECONDS:
+            return True  # the socket may be up, but nothing is coming through
         try:
             if self.printer.mqtt_client.is_connected():
                 self._last_seen_up = time.monotonic()
-                self._backoff = self.INITIAL_BACKOFF_SECONDS  # session verified
+                if self._reports:
+                    self._backoff = self.INITIAL_BACKOFF_SECONDS  # session verified
                 return False
         except Exception:
             pass
@@ -178,11 +244,13 @@ class PrinterConnection:
         return self._login_answered and self._auth_rejected
 
     async def reset_session(self) -> None:
-        """Stop a dead MQTT session so the next reconnect re-probes the IP."""
-        try:
-            await asyncio.to_thread(self.printer.mqtt_stop)
-        except Exception as e:
-            logger.debug("Error stopping MQTT for %s: %s", self.cfg.name, e)
+        """Drop a dead MQTT session so the next reconnect re-probes the IP.
+
+        The old client is retired in the background and replaced, so the
+        reconnect never waits for (or races) its network thread.
+        """
+        mqtt.retire(self.printer)
+        self.printer = self._new_printer()
         self._schedule_retry()
 
     async def read_state(self) -> PrinterState:
@@ -191,11 +259,14 @@ class PrinterConnection:
             # don't poke the library getters, they'd only log "Printer Values
             # Not Available Yet".
             self.state.online = False
-            self.state.last_error = protocol.AUTH_REJECTED if self._auth_rejected else ""
+            self.state.last_error = (
+                protocol.AUTH_REJECTED if self._auth_rejected else self._down_reason
+            )
             self.state.timestamp = time.time()
             return self.state
         try:
             state_data = await asyncio.to_thread(self._read_sync)
+            state_data.last_error = self._down_reason  # until the first report
             self.state = state_data
             return state_data
         except Exception as e:
@@ -597,6 +668,10 @@ class PrinterManager:
     # Discovered-printer cache: forget printers not heard from for this long.
     DISCOVERY_TTL_SECONDS = 300.0
     DISCOVERY_MAX_ENTRIES = 64
+    # At shutdown, how long to let MQTT teardowns send their DISCONNECTs.
+    SHUTDOWN_TEARDOWN_SECONDS = 2.0
+    # Requests that only ask for data; they work without Developer Mode.
+    QUERY_ACTIONS = frozenset({"refresh"})
 
     def __init__(
         self, config: AppConfig, discovery_port: int | None = discovery.SSDP_PORT
@@ -651,6 +726,7 @@ class PrinterManager:
         await asyncio.gather(*tasks, return_exceptions=True)
         for conn in self._connections.values():
             await conn.disconnect()
+        await asyncio.to_thread(mqtt.wait_for_teardowns, self.SHUTDOWN_TEARDOWN_SECONDS)
         logger.info("PrinterManager stopped")
 
     async def add_printer(self, cfg: PrinterConfig) -> None:
@@ -849,6 +925,7 @@ class PrinterManager:
                 await asyncio.sleep(self._config.poll_interval)
                 states: dict[str, Any] = {}
                 for pid, conn in list(self._connections.items()):
+                    await conn.check_silence()
                     # A session that went down (e.g. the printer's IP changed)
                     # is reset so the reconnect re-probes the saved IP.
                     if conn._connected and conn.is_offline():
@@ -902,7 +979,7 @@ class PrinterManager:
             )
         except Exception as e:
             return False, str(e)
-        if ok and conn.state.commands_blocked:
+        if ok and conn.state.commands_blocked and action not in self.QUERY_ACTIONS:
             # Published, but the printer will drop it. Still sent, so a wrong
             # detection can never stop commands from working.
             return False, protocol.COMMANDS_BLOCKED_MESSAGE
@@ -920,35 +997,30 @@ class PrinterManager:
             case "stop":
                 return printer.stop_print(), "Print stopped"
             case "light_on":
-                return PrinterManager._set_light(printer, "on"), "Light turned on"
+                return PrinterManager._sent(PrinterManager._set_light(printer, "on"), "Light turned on")
             case "light_off":
-                return PrinterManager._set_light(printer, "off"), "Light turned off"
+                return PrinterManager._sent(PrinterManager._set_light(printer, "off"), "Light turned off")
             case "set_light":
                 mode = params.get("mode", "on")
-                return PrinterManager._set_light(printer, mode), f"Light {mode}"
+                return PrinterManager._sent(PrinterManager._set_light(printer, mode), f"Light {mode}")
             case "set_speed":
                 lvl = params.get("level", 1)
                 return printer.set_print_speed_lvl(speed_lvl=lvl), f"Speed set to level {lvl}"
+            case "refresh":
+                return PrinterManager._sent(
+                    mqtt.publish(printer, mqtt.pushall_request()), "Refresh requested"
+                )
             case _:
                 return False, f"Unknown action: {action}"
 
     @staticmethod
+    def _sent(ok: bool, msg: str) -> tuple[bool, str]:
+        """Result of an `mqtt.publish` request (False = session down, not sent)."""
+        return (True, msg) if ok else (False, "Not sent: printer not connected")
+
+    @staticmethod
     def _set_light(printer: bl.Printer, mode: str) -> bool:
-        """Set light using the full ledctrl command format (works on all models)."""
-        import json
-        cmd = {
-            "system": {
-                "sequence_id": "0",
-                "command": "ledctrl",
-                "led_node": "chamber_light",
-                "led_mode": mode,
-                "led_on_time": 500,
-                "led_off_time": 500,
-                "loop_times": 0,
-                "interval_time": 0,
-            }
-        }
-        printer.mqtt_client._client.publish(
-            printer.mqtt_client.command_topic, json.dumps(cmd)
-        )
-        return True
+        """`ledctrl` on both chamber LED nodes (the library's helper sends no
+        `led_node`, which not every model accepts)."""
+        results = [mqtt.publish(printer, req) for req in mqtt.light_requests(mode)]
+        return all(results)

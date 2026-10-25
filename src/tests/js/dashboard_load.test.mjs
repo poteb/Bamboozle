@@ -238,6 +238,7 @@ for (const [action, params, url, body] of [
     ['light_on', {}, '/api/printers/p1/light', { on: true }],
     ['light_off', {}, '/api/printers/p1/light', { on: false }],
     ['set_speed', { level: 3 }, '/api/printers/p1/speed', { level: 3 }],
+    ['refresh', {}, '/api/printers/p1/refresh', undefined],
 ]) {
     test(`${action} falls back to REST while the WS is not open and toasts the result`, async () => {
         const { app, fetches, toasts } = setup();

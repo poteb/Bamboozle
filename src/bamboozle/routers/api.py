@@ -6,7 +6,7 @@ import threading
 import bambulabs_api as bl
 from fastapi import APIRouter, HTTPException, Request
 
-from .. import discovery, protocol
+from .. import discovery, mqtt, protocol
 from ..config import save_config
 from ..models import PrinterAddRequest, PrinterConfig, PrinterState, PrinterUpdateRequest
 
@@ -140,6 +140,14 @@ async def set_speed(request: Request, printer_id: str, body: dict) -> dict:
     return {"success": ok, "message": msg}
 
 
+@router.post("/printers/{printer_id}/refresh")
+async def refresh_printer(request: Request, printer_id: str) -> dict:
+    """Ask the printer for a full status report (pushall)."""
+    manager = request.app.state.manager
+    ok, msg = await manager.execute_command(printer_id, "refresh")
+    return {"success": ok, "message": msg}
+
+
 @router.post("/printers/{printer_id}/camera")
 async def toggle_camera(request: Request, printer_id: str, body: dict) -> dict:
     """Toggle camera on/off for a printer."""
@@ -230,7 +238,4 @@ async def test_connection(body: PrinterAddRequest) -> dict:
     except Exception as e:
         return {"success": False, "message": str(e)}
     finally:
-        try:
-            await asyncio.to_thread(printer.mqtt_stop)
-        except Exception:
-            pass
+        mqtt.retire(printer)
