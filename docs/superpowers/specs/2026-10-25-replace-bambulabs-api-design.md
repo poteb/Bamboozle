@@ -126,7 +126,7 @@ The payloads are the same for all four models: OpenBambuAPI `mqtt.md` documents 
 
 - REST action endpoints return `{"success", "message", "confirmed"}`; the WS `command_result` carries `confirmed` too.
 - `ws.py` runs each command in its own task (kept in a set, cancelled when the socket closes, at most 4 at once per socket; more are answered "busy"), so a 10 s confirmation wait doesn't stop the socket from receiving the next message. It also rejects a handshake whose `Origin` is present and doesn't match its `Host` (`Origin: null` included; see §4).
-- `main.py` adds Starlette's `TrustedHostMiddleware` with `127.0.0.1`, `localhost`, `[::1]`: the server only listens on 127.0.0.1, so any other `Host` is a DNS-rebinding page (§4).
+- `main.py` adds Starlette's `TrustedHostMiddleware` with `127.0.0.1`, `localhost` (not `[::1]`: Starlette splits the Host on the first colon, and we only listen on IPv4): the server only listens on 127.0.0.1, so any other `Host` is a DNS-rebinding page (§4).
 - `POST /api/printers/test`: TCP pre-probe as today, then a throwaway `BambuClient` + `MergedReport` (merged on the event loop via `call_soon_threadsafe`); waits for the CONNACK (10 s), the first report (5 s) and a `gcode_state` (5 s more; the client's on-connect pushall asks for it); same messages as today; always retired.
 - `app.js`: a command result with `success` and `confirmed === false` shows an `info` toast instead of `success` (WS and REST fallback alike).
 
@@ -155,7 +155,7 @@ Trust boundaries:
 
 STRIDE / abuse cases, and what this change does:
 - **Cross-site WebSocket hijacking (S/T/E):** a malicious page opens `ws://127.0.0.1:8080/ws`, reads the printer ids from `init` and sends `stop`. Pre-existing. Mitigation: reject the WS handshake when an `Origin` header is present and its host:port differs from `Host`. First abuse-case test.
-- **DNS rebinding (S/T/E/I):** a page on a domain that resolves to 127.0.0.1 is same-origin with us: Origin == Host, so the check above passes; it could read `/api/printers`, POST `/printers/{id}/stop` (no body, no preflight), or PUT a printer's `ip` to an attacker's host and harvest the access code from our MQTT login. Pre-existing. Mitigation: `TrustedHostMiddleware` (Host must be 127.0.0.1 / localhost / [::1]) on HTTP and WS. Test.
+- **DNS rebinding (S/T/E/I):** a page on a domain that resolves to 127.0.0.1 is same-origin with us: Origin == Host, so the check above passes; it could read `/api/printers`, POST `/printers/{id}/stop` (no body, no preflight), or PUT a printer's `ip` to an attacker's host and harvest the access code from our MQTT login. Pre-existing. Mitigation: `TrustedHostMiddleware` (Host must be 127.0.0.1 or localhost) on HTTP and WS. Test.
 - **Cross-site POST (T):** a page can POST `/api/printers/{id}/stop` without a preflight, but it needs the random 12-hex printer id, which it can't read cross-origin (no CORS) once the WS leak and rebinding are closed. Accepted.
 - **Untrusted command params (T):** WS `params` interpolated into MQTT payloads (`speed_lvl` went into `param` unchecked). Mitigation: strict validation in `commands.build` (int 1–4, on/off). Test.
 - **Malformed / hostile reports (D/T):** non-UTF-8, non-JSON, huge, deeply nested payloads from the LAN. Mitigation: size cap 1 MiB, `errors="replace"`, objects only, bounded merge depth, merge/decoders never raise into paho's thread or the loop (exceptions logged). Tests.
