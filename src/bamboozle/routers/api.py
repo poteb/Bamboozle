@@ -166,10 +166,8 @@ async def toggle_camera(request: Request, printer_id: str, body: dict) -> dict:
             break
     save_config(manager.config)
 
-    if enabled:
-        conn.camera.start()
-    else:
-        conn.camera.stop()
+    # stop() joins the capture thread, so keep both off the event loop.
+    await asyncio.to_thread(conn.camera.start if enabled else conn.camera.stop)
 
     return {"success": True, "camera_enabled": enabled}
 

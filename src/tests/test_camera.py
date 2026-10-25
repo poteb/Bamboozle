@@ -1,6 +1,8 @@
 """Camera reconnect policy, frozen-frame watchdog and port-6000 framing."""
+import datetime
 import io
 import socket
+import ssl
 import struct
 import threading
 import time
@@ -29,7 +31,7 @@ def wait_until(cond, timeout=3.0):
 HEALTHY = 0.05
 
 GOOD = "good"  # delivered frames for at least HEALTHY_SESSION_SECONDS
-BLIP = "blip"  # delivered a frame, then died at once
+BLIP = "blip"  # delivered a frame, then nothing more
 FAIL = "fail"  # no frames
 
 
@@ -52,6 +54,7 @@ class ScriptedSessions:
         self.cam._publish(JPEG_A)
         if kind == GOOD:
             time.sleep(HEALTHY + 0.02)
+            self.cam._publish(JPEG_B)
         raise ConnectionError("dropped")
 
     def wait(self, seconds):
@@ -69,6 +72,7 @@ def run_script(monkeypatch):
         cam._capture_session = fake.session
         cam._wait = fake.wait
         cam._running = True
+        cam._thread = threading.current_thread()
         cam._capture_loop()
         return fake
 
@@ -93,7 +97,7 @@ def test_sessions_that_die_right_after_a_frame_still_back_off(run_script):
 
 def test_last_frame_stays_visible_during_fast_respawn(run_script):
     fake = run_script([GOOD, FAIL])
-    assert fake.frame_during_wait[0] == JPEG_A
+    assert fake.frame_during_wait[0] == JPEG_B
 
 
 def test_session_without_frames_clears_the_picture(run_script):
@@ -232,12 +236,12 @@ def test_still_scene_timeout_ends_when_the_picture_changes(ffmpeg, cam, monkeypa
 
 def test_stop_kills_a_stalled_ffmpeg_promptly(ffmpeg, monkeypatch):
     monkeypatch.setattr(CameraStream, "FROZEN_SECONDS", 60)
-    queue, _ = ffmpeg
+    queue, spawned = ffmpeg
     stalled = FakeFfmpeg([])
     queue.append(stalled)
     cam = CameraStream("192.168.0.101", "x", 322)
     cam.start()
-    assert wait_until(lambda: cam._proc is stalled)
+    assert wait_until(lambda: stalled in spawned and cam._interrupt is not None)
     started = time.monotonic()
     cam.stop()
     assert stalled.killed.is_set()
@@ -255,32 +259,101 @@ def test_ffmpeg_that_exits_at_startup_reports_its_stderr(ffmpeg, cam, caplog):
 
 
 @pytest.fixture
-def silent_printer(monkeypatch):
-    """A local TCP server that accepts the camera connection and never sends a byte.
+def silent_printer(tmp_path):
+    """A local TLS server that accepts the camera connection and then sends nothing.
 
-    TLS is skipped (wrap_socket hands back the plain socket), so the capture
-    thread ends up blocked in recv like it would on a stalled printer.
+    With `handshake=False` it doesn't even answer the TLS handshake. Either
+    way the capture thread ends up blocked like on a stalled printer.
     """
+    x509 = pytest.importorskip("cryptography.x509")
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "printer")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (
+        x509.CertificateBuilder().subject_name(name).issuer_name(name)
+        .public_key(key.public_key()).serial_number(x509.random_serial_number())
+        .not_valid_before(now).not_valid_after(now + datetime.timedelta(days=1))
+        .sign(key, hashes.SHA256())
+    )
+    cert_file, key_file = tmp_path / "cert.pem", tmp_path / "key.pem"
+    cert_file.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_file.write_bytes(key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption()))
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(cert_file, key_file)
+
     server = socket.create_server(("127.0.0.1", 0))
     accepted = []
-    threading.Thread(target=lambda: accepted.append(server.accept()[0]), daemon=True).start()
-    monkeypatch.setattr(camera.ssl.SSLContext, "wrap_socket", lambda self, sock, **kw: sock)
-    yield server.getsockname()[1], accepted
+
+    def serve(handshake):
+        conn, _ = server.accept()
+        if handshake:
+            conn = ctx.wrap_socket(conn, server_side=True)
+        accepted.append(conn)
+
+    def run(handshake=True):
+        threading.Thread(target=serve, args=(handshake,), daemon=True).start()
+        return server.getsockname()[1], accepted
+
+    yield run
     for conn in accepted:
         conn.close()
     server.close()
 
 
-def test_stop_interrupts_a_stalled_raw_socket_promptly(silent_printer):
-    port, accepted = silent_printer
+@pytest.mark.parametrize("handshake", [True, False], ids=["in-recv", "in-handshake"])
+def test_stop_interrupts_a_stalled_raw_socket_promptly(silent_printer, handshake):
+    port, accepted = silent_printer(handshake)
     cam = CameraStream("127.0.0.1", "x", port)
     cam.start()
-    assert wait_until(lambda: accepted and cam._sock is not None)
+    assert wait_until(lambda: accepted and cam._interrupt is not None)
+    time.sleep(0.1)  # let the capture thread block
     thread = cam._thread
     started = time.monotonic()
     cam.stop()
     assert time.monotonic() - started < 2
     assert not thread.is_alive()
+
+
+def test_restart_waits_for_a_capture_thread_that_did_not_stop(monkeypatch):
+    """Never two capture threads at once: the camera often allows one client."""
+    monkeypatch.setattr(CameraStream, "STOP_JOIN_SECONDS", 0.05)
+    cam = CameraStream("192.168.0.100", "x", 322)
+    release = threading.Event()
+    entered = []
+    running = []
+    overlap = []
+
+    def session():
+        running.append(1)
+        overlap.append(len(running))
+        entered.append(threading.current_thread())
+        try:
+            if len(entered) == 1:
+                release.wait(5)  # stuck in I/O that stop() can't interrupt
+            else:
+                cam._wait(5)
+        finally:
+            running.pop()
+
+    cam._capture_session = session
+    cam.start()
+    assert wait_until(lambda: len(entered) == 1)
+    cam.stop()
+    cam.start()
+    time.sleep(0.2)
+    assert len(entered) == 1, "second thread started while the first was still connected"
+    release.set()
+    assert wait_until(lambda: len(entered) == 2)
+    assert entered[0] is not entered[1]
+    assert max(overlap) == 1
+    assert not entered[0].is_alive() or wait_until(lambda: not entered[0].is_alive())
+    cam.stop()
 
 
 # -- port 6000 framing ---------------------------------------------------------

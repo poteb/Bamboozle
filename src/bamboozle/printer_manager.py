@@ -179,7 +179,7 @@ class PrinterConnection:
     async def disconnect(self) -> None:
         """Stop the camera and end the MQTT session. Never waits on paho."""
         try:
-            self.camera.stop()
+            await asyncio.to_thread(self.camera.stop)
         except Exception as e:
             logger.debug("Error stopping camera for %s: %s", self.cfg.name, e)
         mqtt.retire(self.printer)
