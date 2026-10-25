@@ -1,0 +1,53 @@
+// Card notice line: refused access code, printer refusing commands (app.js).
+// Run from the repo root:  node --test "src/tests/js/*.test.mjs"
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
+
+const APP_JS = readFileSync(new URL('../../bamboozle/static/app.js', import.meta.url), 'utf8');
+
+function loadApp() {
+    const ctx = vm.createContext({
+        console,
+        location: { protocol: 'http:', host: 'test' },
+        localStorage: { getItem: () => null, setItem: () => {} },
+        document: { getElementById: () => null, addEventListener: () => {} },
+        WebSocket: class {},
+        fetch: () => new Promise(() => {}),
+        setTimeout: () => 0,
+        clearTimeout: () => {},
+        setInterval: () => 0,
+        clearInterval: () => {},
+    });
+    vm.runInContext(APP_JS, ctx);
+    return vm.runInContext('app', ctx);
+}
+
+const app = loadApp();
+const printer = (extra = {}) => ({ online: true, commands_blocked: false, last_error: '', ...extra });
+
+test('a healthy printer has no notice', () => {
+    assert.equal(app.cardNotice(printer()), null);
+});
+
+test('a printer refusing commands says how to fix it', () => {
+    const n = app.cardNotice(printer({ commands_blocked: true }));
+    assert.match(n.text, /refus/i);
+    assert.match(n.text, /Developer Mode/);
+    assert.match(n.title, /LAN Only/);
+});
+
+test('a refused access code says so, and where to fix it', () => {
+    const n = app.cardNotice(printer({ online: false, last_error: 'auth_rejected' }));
+    assert.match(n.text, /access code wrong or changed/i);
+    assert.match(n.text, /Settings/);
+});
+
+test('a stale commands_blocked flag is not shown while the printer is offline', () => {
+    assert.equal(app.cardNotice(printer({ online: false, commands_blocked: true })), null);
+});
+
+test('a printer from an older server without the new fields has no notice', () => {
+    assert.equal(app.cardNotice({ online: true }), null);
+});

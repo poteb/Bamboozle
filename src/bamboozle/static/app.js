@@ -330,6 +330,16 @@ class BamboozleApp {
         // Update camera feed — only add/remove, never replace an active stream
         this.updateCamera(card, id, s);
 
+        // Update notice line (refused access code / refused commands)
+        const noticeEl = card.querySelector('.card-notice');
+        if (noticeEl) {
+            const notice = this.cardNotice(s);
+            const text = notice ? notice.text : '';
+            // Only touch the live region when the text actually changes.
+            if (noticeEl.textContent !== text) noticeEl.textContent = text;
+            noticeEl.title = notice ? notice.title : '';
+        }
+
         const isPrinting = s.gcode_state === 'RUNNING';
         const isPaused = s.gcode_state === 'PAUSE';
         const hasJob = isPrinting || isPaused;
@@ -686,6 +696,7 @@ class BamboozleApp {
         }
 
         const filamentsHtml = this._renderFilaments(s, id);
+        const notice = this.cardNotice(s);
 
         let actionsHtml = '';
         if (hasJob) {
@@ -712,6 +723,7 @@ class BamboozleApp {
             </header>
             ${cameraHtml}
             <div class="card-bottom">
+                <div class="card-notice" role="status" title="${notice ? this.esc(notice.title) : ''}">${notice ? this.esc(notice.text) : ''}</div>
                 <div class="job-section">${hasJob ? `
                     <div class="file-name">${this.esc(s.file_name || 'Unknown file')}</div>
                     <div class="progress-row">
@@ -746,6 +758,25 @@ class BamboozleApp {
                 <div class="actions">${actionsHtml}</div>
             </div>
         `;
+    }
+
+    // One line of "why isn't this working" on the card, or null.
+    cardNotice(s) {
+        if (!s.online && s.last_error === 'auth_rejected') {
+            return {
+                text: 'Access code wrong or changed: update it in Settings',
+                title: 'The printer refused the login. Its access code changes whenever '
+                    + 'LAN Only or Developer Mode is toggled on the printer.',
+            };
+        }
+        if (s.online && s.commands_blocked) {
+            return {
+                text: 'Printer is refusing commands: enable Developer Mode',
+                title: 'Printer is refusing control commands: enable LAN Only + '
+                    + 'Developer Mode on the printer, then restart it',
+            };
+        }
+        return null;
     }
 
     getStatusClass(s) {

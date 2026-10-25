@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import asyncio
+import threading
+
+import bambulabs_api as bl
 from fastapi import APIRouter, HTTPException, Request
 
-from .. import discovery
+from .. import discovery, protocol
 from ..config import save_config
 from ..models import PrinterAddRequest, PrinterConfig, PrinterState, PrinterUpdateRequest
 
 router = APIRouter()
+
+# POST /printers/test: how long to wait for the login answer, then for the
+# first report (the library asks for a pushall as soon as it's logged in).
+TEST_CONNACK_TIMEOUT = 10.0
+TEST_REPORT_TIMEOUT = 5.0
 
 
 @router.get("/printers")
@@ -160,9 +169,6 @@ async def toggle_camera(request: Request, printer_id: str, body: dict) -> dict:
 @router.post("/printers/test")
 async def test_connection(body: PrinterAddRequest) -> dict:
     """Test connecting to a printer without saving it."""
-    import bambulabs_api as bl
-    import asyncio
-
     reachable = await asyncio.to_thread(
         discovery.tcp_reachable, body.ip, discovery.MQTT_PORT
     )
@@ -170,18 +176,38 @@ async def test_connection(body: PrinterAddRequest) -> dict:
         return {"success": False, "message": f"printer unreachable at {body.ip}"}
 
     printer = bl.Printer(body.ip, body.access_code, body.serial)
+    connack: list = []
+    got_connack = threading.Event()
+    got_report = threading.Event()
+
+    def on_connect(_mqtt, _client, _userdata, _flags, rc, _props):
+        connack.append(rc)
+        got_connack.set()
+
+    printer.mqtt_client.on_connect_handler = on_connect
+    printer.mqtt_client.on_message_handler = lambda *_: got_report.set()
     try:
         await asyncio.to_thread(printer.mqtt_start)
-        await asyncio.sleep(3)
+        if not await asyncio.to_thread(got_connack.wait, TEST_CONNACK_TIMEOUT):
+            return {"success": False,
+                    "message": f"MQTT login to {body.ip} timed out"}
+        rc = connack[0]
+        if protocol.is_auth_refusal(rc):
+            return {"success": False, "message": protocol.AUTH_REJECTED_MESSAGE}
+        if getattr(rc, "is_failure", False):
+            return {"success": False, "message": f"Printer refused the connection: {rc}"}
+        if not await asyncio.to_thread(got_report.wait, TEST_REPORT_TIMEOUT):
+            return {"success": False,
+                    "message": "Connected, but the printer sent no data: check the serial number"}
         state = await asyncio.to_thread(printer.get_state)
-        await asyncio.to_thread(printer.mqtt_stop)
         return {
             "success": True,
             "message": f"Connected successfully. State: {state}",
         }
     except Exception as e:
+        return {"success": False, "message": str(e)}
+    finally:
         try:
             await asyncio.to_thread(printer.mqtt_stop)
         except Exception:
             pass
-        return {"success": False, "message": str(e)}

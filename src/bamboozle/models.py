@@ -57,6 +57,12 @@ class PrinterState(BaseModel):
     thumbnail_key: str = ""
     filaments: list[Filament] = []
     error_code: int = 0
+    # None when the printer doesn't report it (A1 / P1 send no `fun` field).
+    developer_mode: bool | None = None
+    # The printer is known to drop control commands (see protocol.py).
+    commands_blocked: bool = False
+    # Why the connection is down, when known: "" or protocol.AUTH_REJECTED.
+    last_error: str = ""
     sort: int = 0
     timestamp: float = Field(default_factory=time.time)
 
