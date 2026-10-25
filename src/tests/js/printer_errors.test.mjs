@@ -41,12 +41,12 @@ const app = loadApp();
 const plain = (html) => html.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
 
 const REFUSED = {
-    kind: 'hms', code: '0500_0500_0001_0007', severity: 'fatal', module: 'Mainboard',
-    description: 'Refused a LAN command it couldn\'t verify (Developer Mode off).',
+    kind: 'hms', code: '0500_0500_0001_0007', severity: 'fatal', module: 'System',
+    description: 'A LAN command was refused earlier: it couldn\'t be verified (Developer Mode allows them).',
     url: 'https://e.bambulab.com/index.php?e=0500050000010007&s=device_hms&lang=en', active: false,
 };
 const H2C_OTHER = {
-    kind: 'hms', code: '0500_0600_0002_0006', severity: 'serious', module: 'Mainboard',
+    kind: 'hms', code: '0500_0600_0002_0006', severity: 'serious', module: 'System',
     description: '', url: 'https://e.bambulab.com/index.php?e=0500060000020006&s=device_hms&lang=en',
     active: false,
 };
@@ -70,7 +70,7 @@ test('an active error is a prominent line: severity, module, linked code', () =>
     const html = app.errorsHtml(printer([RUNOUT]));
     assert.match(html, /class="card-errors-active"/);
     assert.doesNotMatch(html, /<details/);
-    assert.equal(plain(html), 'Warning · AMS 2 · 0701_2000_0002_0001 ↗');
+    assert.equal(plain(html), 'Warning · AMS 2 · 0701_2000_0002_0001');
     assert.match(html, /<a href="https:\/\/e\.bambulab\.com\/index\.php\?e=0701200000020001&amp;s=device_hms&amp;lang=en" target="_blank" rel="noopener noreferrer"[^>]*>0701_2000_0002_0001/);
 });
 
@@ -80,7 +80,7 @@ test('lingering messages are a quiet collapsed line, not an active fault', () =>
     assert.match(html, /^<details class="card-errors-lingering"><summary>2 printer messages<\/summary>/);
     // Each still links to the wiki; ours-described codes carry the description.
     assert.match(html, /0500_0500_0001_0007/);
-    assert.match(html, /Developer Mode off/);
+    assert.match(html, /Developer Mode allows them/);
     assert.match(html, /e=0500060000020006/);
 });
 
@@ -98,11 +98,11 @@ test('active errors come first, lingering ones stay collapsed below', () => {
 
 test('severity labels', () => {
     const label = (severity) => plain(app.errorLineHtml({ ...RUNOUT, severity, module: '' }));
-    assert.equal(label('fatal'), 'Error · 0701_2000_0002_0001 ↗');
-    assert.equal(label('serious'), 'Warning · 0701_2000_0002_0001 ↗');
-    assert.equal(label('common'), 'Notice · 0701_2000_0002_0001 ↗');
-    assert.equal(label('info'), 'Info · 0701_2000_0002_0001 ↗');
-    assert.equal(label(''), '0701_2000_0002_0001 ↗');
+    assert.equal(label('fatal'), 'Error · 0701_2000_0002_0001');
+    assert.equal(label('serious'), 'Warning · 0701_2000_0002_0001');
+    assert.equal(label('common'), 'Notice · 0701_2000_0002_0001');
+    assert.equal(label('info'), 'Info · 0701_2000_0002_0001');
+    assert.equal(label(''), '0701_2000_0002_0001');
 });
 
 test('a code without an https link is plain text', () => {

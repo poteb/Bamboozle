@@ -52,7 +52,7 @@ def test_hms_level_zero_is_not_a_message():
 
 @pytest.mark.parametrize("attr, module", [
     (0x03000100, "Motion controller"),
-    (0x05000500, "Mainboard"),
+    (0x05000500, "System"),
     (0x07002000, "AMS 1"),
     (0x07032300, "AMS 4"),
     (0x07FF2000, "External spool"),

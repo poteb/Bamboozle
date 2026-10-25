@@ -915,7 +915,7 @@ class BamboozleApp {
         const code = this.esc(e.code);
         const codeHtml = typeof e.url === 'string' && e.url.startsWith('https://')
             ? `<a href="${this.esc(e.url)}" target="_blank" rel="noopener noreferrer" `
-                + `title="Look up this code on Bambu Lab's wiki">${code} ↗</a>`
+                + `title="Look up this code on Bambu Lab's wiki">${code}</a>`
             : code;
         const parts = [label, e.module].filter(Boolean).map((p) => this.esc(p));
         parts.push(codeHtml);

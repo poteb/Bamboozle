@@ -34,7 +34,7 @@ _PRINT_ERROR_MIN = 0x4000
 # Module byte. AMS modules carry the unit in the next byte.
 _MODULE_NAMES = {
     0x03: "Motion controller",
-    0x05: "Mainboard",
+    0x05: "System",  # mainboard: also maintenance reminders, LAN commands
     0x08: "Toolhead",
     0x0C: "Camera / lidar",
 }
@@ -49,8 +49,8 @@ _USER_CANCEL = frozenset({"0300_400C", "0500_400E"})
 # Codes we understand well enough to describe in our own words.
 _REFUSED_COMMAND = "0500050000010007"
 _DESCRIPTIONS = {
-    _REFUSED_COMMAND: "Refused a LAN command it couldn't verify (Developer Mode off). "
-                      "It stays listed after the refusal.",
+    _REFUSED_COMMAND: "A LAN command was refused earlier: it couldn't be verified "
+                      "(Developer Mode allows them). It stays listed; not a fault.",
 }
 # Records of something that happened, never why a job is paused: the user's
 # H2C and P2S carry the refused-command code while the light works.
