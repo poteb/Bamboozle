@@ -244,7 +244,7 @@ function renderDiscovery(data) {
         const li = document.createElement('li');
         const btn = document.createElement('button');
         btn.type = 'button';
-        btn.className = 'discovery-item' + (p.serial === discoveryPicked ? ' selected' : '');
+        btn.className = 'discovery-item' + (p.serial.toUpperCase() === discoveryPicked ? ' selected' : '');
         const name = document.createElement('strong');
         name.textContent = p.name || p.serial;
         const meta = document.createElement('span');
@@ -271,7 +271,7 @@ function pickDiscovered(p, btn) {
     }
     const nameInput = document.getElementById('printer-name');
     if (!nameInput.value.trim() && p.name) nameInput.value = p.name;
-    discoveryPicked = p.serial;
+    discoveryPicked = p.serial.toUpperCase();
     document.querySelectorAll('#discovery-list .discovery-item').forEach(el => {
         el.classList.toggle('selected', el === btn);
     });
