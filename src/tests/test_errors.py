@@ -82,6 +82,8 @@ def test_refused_command_record_has_our_own_description():
     [e] = hms.hms_errors({"hms": [VERIFY_FAILED]})
     assert e.code == "0500_0500_0001_0007"
     assert "Developer Mode" in e.description
+    # Its level says "fatal", but it's a record, not a fault: no severity label.
+    assert e.severity == ""
 
 
 # --- print_error ------------------------------------------------------------------
@@ -133,6 +135,15 @@ def test_messages_explain_a_paused_or_failed_job(state):
                                  "print_error": 0x07018011})
     assert codes(errors) == ["0701_2000_0002_0001", "0701_8011"]
     assert all(e.active for e in errors)
+
+
+def test_a_fatal_message_is_active_even_without_a_job():
+    """A fatal HMS (e.g. a heater fault) stops the printer from printing at all."""
+    errors = hms.printer_errors({"gcode_state": "IDLE", "hms": [
+        {"attr": 0x03000100, "code": 0x00010005}, H2C_OTHER, VERIFY_FAILED]})
+    assert [(e.code, e.active) for e in errors] == [
+        ("0300_0100_0001_0005", True), ("0500_0600_0002_0006", False),
+        ("0500_0500_0001_0007", False)]
 
 
 def test_running_job_messages_are_not_active():

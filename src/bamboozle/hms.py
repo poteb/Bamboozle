@@ -61,7 +61,8 @@ _STOPPED_JOB = frozenset({"PAUSE", "FAILED"})
 # ... unless it was the user (or the file) that stopped it: `stg_cur` 5 (M400
 # pause), 16 (paused by the user), 30 (paused by the G-code), or a cancel.
 _USER_PAUSE_STAGES = frozenset({5, 16, 30})
-# Levels that stop or pause a job; common / info are notifications.
+# Levels that stop or pause a job; common / info are notifications. A record
+# has no severity (see hms_errors), so it's never one of these.
 _STOPPING_LEVELS = frozenset({"fatal", "serious"})
 
 HMS_URL = "https://e.bambulab.com/index.php?e={code}&s=device_hms&lang=en"
@@ -94,7 +95,8 @@ def hms_errors(print_payload: dict) -> list[PrinterError]:
         out.append(PrinterError(
             kind="hms",
             code="_".join(full[i:i + 4] for i in range(0, 16, 4)),
-            severity=_HMS_LEVELS.get(level, ""),
+            # A record's level (fatal, for the refused command) isn't a fault's.
+            severity="" if full in _RECORD_ONLY else _HMS_LEVELS.get(level, ""),
             module=module_name(attr >> 24, (attr >> 16) & 0xFF),
             description=_DESCRIPTIONS.get(full, ""),
             url=HMS_URL.format(code=full),
@@ -144,26 +146,27 @@ def _stopped_by_fault(print_payload: dict) -> bool:
 def _explains_stop(e: PrinterError) -> bool:
     if e.kind == "print_error":
         return True  # the job's own error
-    return e.severity in _STOPPING_LEVELS and e.code.replace("_", "") not in _RECORD_ONLY
+    return e.severity in _STOPPING_LEVELS
 
 
 def printer_errors(print_payload: dict) -> list[PrinterError]:
     """HMS messages and the print error: active ones first, then by severity.
 
-    Active means it likely explains why the job is paused or failed: the job
-    stopped on its own (not paused / cancelled by the user), and the error is
-    the print error or an HMS at a level that stops or pauses a job (not a
-    record like the refused-command code). The rest are lingering: the
-    printer keeps HMS messages until they're acknowledged on it.
+    Active means a current fault: a fatal HMS (it keeps the printer from
+    printing, job or not), or what likely explains why the job is paused or
+    failed: the job stopped on its own (not paused / cancelled by the user),
+    and the error is the print error or a serious HMS. Records like the
+    refused-command code never are. The rest are lingering: the printer keeps
+    HMS messages until they're acknowledged on it.
     """
     errors = hms_errors(print_payload)
     pe = print_error(print_payload)
-    # The same fault is often raised as both; the HMS form says more.
+    # The same fault can be raised as both; the HMS form says more.
     if pe and not any(_hms_short(e.code) == pe.code for e in errors):
         errors.append(pe)
     stopped = _stopped_by_fault(print_payload)
     for e in errors:
-        e.active = stopped and _explains_stop(e)
+        e.active = (e.kind == "hms" and e.severity == "fatal") or (stopped and _explains_stop(e))
     return sorted(errors, key=lambda e: (not e.active, _SEVERITY_ORDER.index(e.severity)))
 
 

@@ -938,7 +938,8 @@ class BamboozleApp {
         if (lingering.length) {
             const n = lingering.length;
             const summary = `${n}${active.length ? ' more' : ''} printer message${n === 1 ? '' : 's'}`;
-            html += `<details class="card-errors-lingering"><summary>${summary}</summary>`
+            // aria-live off: only active errors are worth announcing.
+            html += `<details class="card-errors-lingering" aria-live="off"><summary>${summary}</summary>`
                 + `${lingering.map((e) => this.errorLineHtml(e)).join('')}</details>`;
         }
         return html;

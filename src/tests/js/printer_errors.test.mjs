@@ -41,7 +41,8 @@ const app = loadApp();
 const plain = (html) => html.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
 
 const REFUSED = {
-    kind: 'hms', code: '0500_0500_0001_0007', severity: 'fatal', module: 'System',
+    // A record, not a fault: the server sends it without a severity.
+    kind: 'hms', code: '0500_0500_0001_0007', severity: '', module: 'System',
     description: 'A LAN command was refused earlier: it couldn\'t be verified (Developer Mode allows them).',
     url: 'https://e.bambulab.com/index.php?e=0500050000010007&s=device_hms&lang=en', active: false,
 };
@@ -77,11 +78,16 @@ test('an active error is a prominent line: severity, module, linked code', () =>
 test('lingering messages are a quiet collapsed line, not an active fault', () => {
     const html = app.errorsHtml(printer([REFUSED, H2C_OTHER]));
     assert.doesNotMatch(html, /card-errors-active/);
-    assert.match(html, /^<details class="card-errors-lingering"><summary>2 printer messages<\/summary>/);
+    // aria-live off: only active errors are announced, not lingering ones.
+    assert.match(html, /^<details class="card-errors-lingering" aria-live="off"><summary>2 printer messages<\/summary>/);
     // Each still links to the wiki; ours-described codes carry the description.
     assert.match(html, /0500_0500_0001_0007/);
     assert.match(html, /Developer Mode allows them/);
     assert.match(html, /e=0500060000020006/);
+});
+
+test('the refused-command record reads as a note, not an error', () => {
+    assert.match(plain(app.errorLineHtml(REFUSED)), /^System · 0500_0500_0001_0007A LAN command/);
 });
 
 test('one lingering message is singular', () => {
