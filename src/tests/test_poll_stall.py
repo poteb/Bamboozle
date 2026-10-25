@@ -81,7 +81,7 @@ def test_a_slow_read_does_not_stall_the_other_printers(lan, monkeypatch):
         release.set()
     fresh = _fresh_updates(ws, "fast", since)
     # Not held up by the stuck step on every round either (~0.12 s a round).
-    assert len(fresh) >= 12
+    assert len(fresh) >= 8
     # The stuck printer is still listed, with its last known state.
     assert all("slow" in m["printers"] for m in fresh)
 

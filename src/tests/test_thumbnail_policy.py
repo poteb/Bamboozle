@@ -240,3 +240,8 @@ def test_an_internal_url_for_a_longer_named_job_does_not_match():
     assert protocol.file_on_internal_storage(payload) is False
     payload["url"] = "brtc://emmc/Cube.gcode.3mf"
     assert protocol.file_on_internal_storage(payload) is True
+
+
+def test_an_internal_url_matches_a_subtask_name_with_an_extension():
+    payload = {"sdcard": True, "subtask_name": "Cube.3mf", "url": "brtc://emmc/Cube.3mf"}
+    assert protocol.file_on_internal_storage(payload) is True

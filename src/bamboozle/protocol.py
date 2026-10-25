@@ -125,9 +125,13 @@ def file_on_internal_storage(print_payload: dict) -> bool:
     url = unquote(url)
     if not url.lower().startswith(_INTERNAL_URL_PREFIXES):
         return False
-    name = url.rsplit("/", 1)[-1]
-    for ext in (".gcode.3mf", ".3mf"):
-        if name.lower().endswith(ext):
-            name = name[: -len(ext)]
-            break
+    name = _strip_print_ext(url.rsplit("/", 1)[-1])
+    subtask = _strip_print_ext(subtask)
     return name in (subtask, subtask.replace(" ", "_"))
+
+
+def _strip_print_ext(name: str) -> str:
+    for ext in (".gcode.3mf", ".3mf", ".gcode"):
+        if name.lower().endswith(ext):
+            return name[: -len(ext)]
+    return name

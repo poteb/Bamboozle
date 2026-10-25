@@ -468,7 +468,8 @@ class PrinterConnection:
         restarted = (
             job.gcode_state in self._JOB_ACTIVE and self._thumb_last_state in self._JOB_ENDED
         )
-        self._thumb_last_state = job.gcode_state
+        if job.gcode_state != "UNKNOWN":  # e.g. a reconnect between the prints
+            self._thumb_last_state = job.gcode_state
         if not job.key:
             if job.gcode_state == "IDLE":
                 self._forget_thumbnail()
