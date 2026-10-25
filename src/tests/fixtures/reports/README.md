@@ -97,5 +97,5 @@ python -m tools.capture_reports mask                   # raw -> these files
 
 `capture` sends only one standalone `pushall` and `get_version` per printer
 (no pushall within 5 minutes of the last one, tracked in
-`%TEMP%amboozle-capture-pushall-ledger.json`), one MQTT session per printer.
+`%TEMP%/bamboozle-capture-pushall-ledger.json`), one MQTT session per printer.
 Delete the raw directory afterwards: it holds the real serials and IPs.

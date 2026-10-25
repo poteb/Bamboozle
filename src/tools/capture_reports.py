@@ -11,9 +11,10 @@ session (TLS, user `bblp`), subscribes to `device/<serial>/report`, and sends
 only one standalone `pushall` and a standalone `get_version` (retried once if
 unanswered). Nothing else is ever published. It refuses to send a pushall to a
 printer that got one from this tool in the last 5 minutes (P1-series printers
-lag on frequent pushalls; the ledger is `%TEMP%/bamboozle-capture-pushall-ledger.json`). The raw capture (real serials and IPs, never the
-access code, which reports don't carry) goes to a directory outside the repo,
-by default `%TEMP%/bamboozle-capture`.
+lag on frequent pushalls; the ledger is
+`%TEMP%/bamboozle-capture-pushall-ledger.json`). The raw capture (real
+serials and IPs, never the access code, which reports don't carry) goes to a
+directory outside the repo, by default `%TEMP%/bamboozle-capture`.
 
 `mask` rewrites the raw capture into the fixture format (see
 `tests/fixtures/reports/README.md`) with serials, IPs, cloud ids, SSIDs, MACs

@@ -16,8 +16,8 @@ REFUSED_COMMAND = "0500050000010007"
 SERIAL_KEYS = frozenset({"sn", "dev_id", "ams_id"})
 CLOUD_ID_KEYS = frozenset({"task_id", "subtask_id", "project_id", "job_id", "profile_id",
                            "design_id", "model_id", "lan_task_id"})
-# What the Masker writes: 0 / "" (none), or 10...0N, or masked-N.
-FAKE_ID_RE = re.compile(r"|0|10*\d{1,3}|masked-\d+")
+# What the Masker writes: 0 / "" (none), 10...0N (same length), N, or masked-N.
+FAKE_ID_RE = re.compile(r"|0|10+\d{1,2}|\d{1,2}|masked-\d+")
 FAKE_CHIP_RE = re.compile(r"0+[0-9a-f]{1,3}")
 IPV4_RE = re.compile(r"(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d.])")
 
