@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import asyncio
+import threading
+
+import bambulabs_api as bl
 from fastapi import APIRouter, HTTPException, Request
 
-from .. import discovery
+from .. import discovery, mqtt, protocol
 from ..config import save_config
 from ..models import PrinterAddRequest, PrinterConfig, PrinterState, PrinterUpdateRequest
 
 router = APIRouter()
+
+# POST /printers/test: how long to wait for the login answer, then for the
+# first report and (separately) the full status.
+TEST_CONNACK_TIMEOUT = 10.0
+TEST_REPORT_TIMEOUT = 5.0
 
 
 @router.get("/printers")
@@ -131,6 +140,14 @@ async def set_speed(request: Request, printer_id: str, body: dict) -> dict:
     return {"success": ok, "message": msg}
 
 
+@router.post("/printers/{printer_id}/refresh")
+async def refresh_printer(request: Request, printer_id: str) -> dict:
+    """Ask the printer for a full status report (pushall)."""
+    manager = request.app.state.manager
+    ok, msg = await manager.execute_command(printer_id, "refresh")
+    return {"success": ok, "message": msg}
+
+
 @router.post("/printers/{printer_id}/camera")
 async def toggle_camera(request: Request, printer_id: str, body: dict) -> dict:
     """Toggle camera on/off for a printer."""
@@ -139,20 +156,19 @@ async def toggle_camera(request: Request, printer_id: str, body: dict) -> dict:
     if not conn:
         raise HTTPException(404, "Printer not found")
 
-    enabled = body.get("enabled", not conn.cfg.camera_enabled)
-    conn.cfg.camera_enabled = enabled
+    async with conn.camera_toggle_lock:
+        enabled = body.get("enabled", not conn.cfg.camera_enabled)
+        conn.cfg.camera_enabled = enabled
 
-    # Update config
-    for p in manager.config.printers:
-        if p.id == printer_id:
-            p.camera_enabled = enabled
-            break
-    save_config(manager.config)
+        # Update config
+        for p in manager.config.printers:
+            if p.id == printer_id:
+                p.camera_enabled = enabled
+                break
+        save_config(manager.config)
 
-    if enabled:
-        conn.camera.start()
-    else:
-        conn.camera.stop()
+        # stop() joins the capture thread, so keep both off the event loop.
+        await asyncio.to_thread(conn.camera.start if enabled else conn.camera.stop)
 
     return {"success": True, "camera_enabled": enabled}
 
@@ -160,9 +176,6 @@ async def toggle_camera(request: Request, printer_id: str, body: dict) -> dict:
 @router.post("/printers/test")
 async def test_connection(body: PrinterAddRequest) -> dict:
     """Test connecting to a printer without saving it."""
-    import bambulabs_api as bl
-    import asyncio
-
     reachable = await asyncio.to_thread(
         discovery.tcp_reachable, body.ip, discovery.MQTT_PORT
     )
@@ -170,18 +183,58 @@ async def test_connection(body: PrinterAddRequest) -> dict:
         return {"success": False, "message": f"printer unreachable at {body.ip}"}
 
     printer = bl.Printer(body.ip, body.access_code, body.serial)
+    mqtt_client = printer.mqtt_client
+    connack: list = []
+    got_connack = threading.Event()
+    got_report = threading.Event()  # anything on the serial's report topic
+    got_status = threading.Event()  # a report carrying gcode_state
+
+    def on_connect(_mqtt, _client, _userdata, _flags, rc, _props):
+        connack.append(rc)
+        got_connack.set()
+
+    def gcode_state() -> str | None:
+        return (mqtt_client.dump().get("print") or {}).get("gcode_state")
+
+    def on_message(*_):
+        got_report.set()
+        if gcode_state():
+            got_status.set()
+
+    mqtt_client.on_connect_handler = on_connect
+    mqtt_client.on_message_handler = on_message
     try:
         await asyncio.to_thread(printer.mqtt_start)
-        await asyncio.sleep(3)
-        state = await asyncio.to_thread(printer.get_state)
-        await asyncio.to_thread(printer.mqtt_stop)
+        if not await asyncio.to_thread(got_connack.wait, TEST_CONNACK_TIMEOUT):
+            return {"success": False,
+                    "message": f"MQTT login to {body.ip} timed out"}
+        rc = connack[0]
+        if protocol.is_auth_refusal(rc):
+            return {"success": False, "message": protocol.AUTH_REJECTED_MESSAGE}
+        if protocol.connack_failed(rc):
+            return {"success": False, "message": f"Printer refused the connection: {rc}"}
+        if not await asyncio.to_thread(got_report.wait, TEST_REPORT_TIMEOUT):
+            return {"success": False,
+                    "message": "Connected, but the printer sent no data: check the serial number"}
+        if not got_status.is_set():
+            # A1 / P1S ignore the library's combined on-connect request, so
+            # ask for the full status on its own.
+            # Login and serial are proven already, so a failure here only
+            # costs the state; the publish wait has no timeout of its own.
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(mqtt_client.pushall), TEST_REPORT_TIMEOUT
+                )
+                await asyncio.to_thread(got_status.wait, TEST_REPORT_TIMEOUT)
+            except Exception:
+                pass
+        state = gcode_state()
         return {
             "success": True,
-            "message": f"Connected successfully. State: {state}",
+            "message": f"Connected successfully. State: {state}" if state
+            else "Connected successfully",
         }
     except Exception as e:
-        try:
-            await asyncio.to_thread(printer.mqtt_stop)
-        except Exception:
-            pass
         return {"success": False, "message": str(e)}
+    finally:
+        mqtt.retire(printer)

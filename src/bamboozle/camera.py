@@ -9,6 +9,8 @@ import struct
 import subprocess
 import threading
 import time
+from collections import deque
+from collections.abc import Callable, Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -38,70 +40,275 @@ def _find_ffmpeg() -> str | None:
     return None
 
 
+JPEG_SOI = b"\xff\xd8"
+JPEG_EOI = b"\xff\xd9"
+RAW_HEADER_SIZE = 16
+MAX_RAW_PAYLOAD = 10_000_000
+
+
+def raw_frames(recv: Callable[[int], bytes], buf: bytearray) -> Iterator[bytes]:
+    """Yield JPEG frames from the port-6000 stream until the connection closes.
+
+    Each frame is a 16-byte header (payload size, little-endian, first) and
+    then the JPEG. `buf` holds bytes already read. An implausible size or a
+    payload that isn't a JPEG means we've lost the frame boundary. Skipping
+    would only parse the next "header" from the middle of a frame, so raise
+    ConnectionError and let the caller reconnect.
+    """
+    while True:
+        _fill(recv, buf, RAW_HEADER_SIZE)
+        size = int.from_bytes(buf[0:4], byteorder="little")
+        if not 0 < size <= MAX_RAW_PAYLOAD:
+            raise ConnectionError(f"Camera stream out of sync (payload size {size})")
+        _fill(recv, buf, RAW_HEADER_SIZE + size)
+        frame = bytes(buf[RAW_HEADER_SIZE : RAW_HEADER_SIZE + size])
+        del buf[: RAW_HEADER_SIZE + size]
+        if not (frame.startswith(JPEG_SOI) and frame.endswith(JPEG_EOI)):
+            raise ConnectionError("Camera stream out of sync (payload is not a JPEG)")
+        yield frame
+
+
+def _fill(recv: Callable[[int], bytes], buf: bytearray, n: int) -> None:
+    while len(buf) < n:
+        chunk = recv(65536)
+        if not chunk:
+            raise ConnectionError("Connection closed")
+        buf += chunk
+
+
+def jpeg_frames(read: Callable[[int], bytes]) -> Iterator[bytes]:
+    """Yield the JPEGs in an MJPEG byte stream (ffmpeg stdout) until EOF."""
+    buf = b""
+    while True:
+        chunk = read(4096)
+        if not chunk:
+            return
+        buf += chunk
+        while True:
+            soi = buf.find(JPEG_SOI)
+            if soi == -1:
+                buf = b""
+                break
+            eoi = buf.find(JPEG_EOI, soi + 2)
+            if eoi == -1:
+                buf = buf[soi:]
+                break
+            yield buf[soi : eoi + 2]
+            buf = buf[eoi + 2 :]
+
+
+def rtsp_command(ffmpeg: str, url: str) -> list[str]:
+    """The ffmpeg command line that turns the printer's RTSPS feed into MJPEG on stdout."""
+    return [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel", "error",
+        "-rtsp_transport", "tcp",
+        "-tls_verify", "0",
+        "-timeout", "10000000",
+        "-i", url,
+        "-f", "mjpeg",
+        "-q:v", "5",
+        "-r", "10",
+        "-an",
+        "pipe:1",
+    ]
+
+
+class _FreezeWatch:
+    """Tracks when an ffmpeg session last delivered a picture different from the one before.
+
+    `frozen_on` is the picture the previous ffmpeg froze on. If a fresh ffmpeg
+    shows exactly that picture, the scene is still rather than the stream
+    dead, so the long timeout applies until the picture changes.
+    """
+
+    def __init__(self, frozen_after: float, still_after: float, frozen_on: bytes | None):
+        self._frozen_after = frozen_after
+        self._still_after = still_after
+        self.frozen_on = frozen_on
+        self.timeout = frozen_after
+        self.last: bytes | None = None
+        self.tripped = False
+        self._changed_at = time.monotonic()
+
+    def feed(self, frame: bytes) -> None:
+        if frame == self.last:
+            return
+        self.last = frame
+        self._changed_at = time.monotonic()
+        if self.frozen_on is not None and frame == self.frozen_on:
+            self.timeout = self._still_after
+        else:
+            self.frozen_on = None
+            self.timeout = self._frozen_after
+
+    def frozen(self) -> bool:
+        return time.monotonic() - self._changed_at > self.timeout
+
+    def trip(self) -> None:
+        self.tripped = True
+        self.frozen_on = self.last
+
+
 class CameraStream:
     """Captures JPEG frames from a Bambu Lab printer camera.
 
     Supports two protocols:
     - Raw TLS socket (port 6000): A1, P1, P1S series
     - RTSP over TLS (port 322): X1, X1C, H2C, H2D, P2 series
+
+    Sessions drop routinely (an X1/P2 RTSP session often lasts about a
+    minute). A healthy session (frames for at least HEALTHY_SESSION_SECONDS)
+    is respawned after RESPAWN_SECONDS, with the last frame kept on screen.
+    Other sessions back off exponentially from BACKOFF_MIN_SECONDS to
+    BACKOFF_MAX_SECONDS, so a printer that drops us right after a frame isn't
+    hammered. A session that delivered no frames also clears the picture.
     """
+
+    HEALTHY_SESSION_SECONDS = 10.0
+    RESPAWN_SECONDS = 0.5
+    BACKOFF_MIN_SECONDS = 3.0
+    BACKOFF_MAX_SECONDS = 60.0
+    # A frame this old is not served, so a dead stream shows "connecting".
+    FRAME_MAX_AGE_SECONDS = 20.0
+    # ffmpeg is restarted when the picture hasn't changed for this long.
+    # A dead upstream can leave it repeating its last frame indefinitely.
+    FROZEN_SECONDS = 20.0
+    STILL_SCENE_SECONDS = 300.0
+    WATCH_INTERVAL_SECONDS = 1.0
+    FFMPEG_STARTUP_SECONDS = 1.0
+    STOP_JOIN_SECONDS = 10.0
 
     def __init__(self, ip: str, access_code: str, camera_port: int = 6000):
         self._ip = ip
         self._access_code = access_code
         self._port = camera_port
         self._frame: bytes | None = None
+        self._frame_at = 0.0
         self._lock = threading.Lock()
         self._running = False
+        # One per run: start() makes a fresh one, so a superseded thread's set
+        # event can't stop the new run.
+        self._stopped = threading.Event()
         self._thread: threading.Thread | None = None
-        self._connected = False
+        # How stop() interrupts the blocking I/O of the current session
+        # (kill ffmpeg, close the socket). Guarded by _io_lock.
+        self._interrupt: Callable[[], None] | None = None
+        self._io_lock = threading.Lock()
+        self._session_frames = 0
+        self._session_first_at = 0.0
+        self._session_last_at = 0.0
+        self._frozen_on: bytes | None = None
 
     @property
     def available(self) -> bool:
-        return self._connected and self._frame is not None
+        return self.get_frame() is not None
 
     def start(self) -> None:
         if self._running:
             return
+        # A capture thread from an earlier run may still be blocked in I/O.
+        # The new thread waits for it, since the camera often accepts only
+        # one client. It's no longer self._thread, so it won't carry on.
+        previous = self._thread if self._thread and self._thread.is_alive() else None
         self._running = True
-        self._thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self._stopped = threading.Event()
+        self._thread = threading.Thread(target=self._capture_loop, args=(previous,), daemon=True)
         self._thread.start()
         logger.info("Camera stream started for %s:%d", self._ip, self._port)
 
     def stop(self) -> None:
-        self._running = False
-        if self._thread:
-            self._thread.join(timeout=10)
-            self._thread = None
-        self._connected = False
-        self._frame = None
+        """Stop capturing. Blocks up to STOP_JOIN_SECONDS, so call it off the event loop."""
+        with self._io_lock:
+            self._running = False
+            self._stopped.set()
+            interrupt = self._interrupt
+        if interrupt is not None:
+            interrupt()
+        thread = self._thread
+        if thread:
+            thread.join(timeout=self.STOP_JOIN_SECONDS)
+            if not thread.is_alive() and self._thread is thread:
+                self._thread = None
+        with self._lock:
+            self._frame = None
+        self._frozen_on = None
         logger.info("Camera stream stopped for %s", self._ip)
 
     def get_frame(self) -> bytes | None:
         with self._lock:
+            if self._frame is None or time.monotonic() - self._frame_at > self.FRAME_MAX_AGE_SECONDS:
+                return None
             return self._frame
 
-    def _capture_loop(self) -> None:
-        backoff = 3.0
-        while self._running:
-            try:
-                if self._port == 322:
-                    self._capture_rtsp()
-                else:
-                    self._capture_raw_socket()
-            except Exception as e:
-                logger.error("Camera error for %s:%d: %s", self._ip, self._port, e)
-            finally:
-                self._connected = False
-                with self._lock:
-                    self._frame = None
+    def _active(self) -> bool:
+        """True in the capture thread of the current run until stop()."""
+        return self._running and threading.current_thread() is self._thread
 
-            if self._running:
-                logger.info("Camera reconnecting to %s in %.0fs", self._ip, backoff)
-                deadline = time.monotonic() + backoff
-                while self._running and time.monotonic() < deadline:
-                    time.sleep(0.5)
-                backoff = min(backoff * 2, 60.0)
+    def _publish(self, frame: bytes) -> None:
+        now = time.monotonic()
+        with self._lock:
+            self._frame = frame
+            self._frame_at = now
+        if not self._session_frames:
+            self._session_first_at = now
+        self._session_frames += 1
+        self._session_last_at = now
+
+    def _session_was_healthy(self) -> bool:
+        return (
+            self._session_frames > 0
+            and self._session_last_at - self._session_first_at >= self.HEALTHY_SESSION_SECONDS
+        )
+
+    def _wait(self, seconds: float) -> None:
+        self._stopped.wait(seconds)
+
+    def _set_interrupt(self, interrupt: Callable[[], None]) -> bool:
+        """Let stop() interrupt this session's I/O. False if the run is already over."""
+        with self._io_lock:
+            if not self._active():
+                return False
+            self._interrupt = interrupt
+            return True
+
+    def _clear_interrupt(self, interrupt: Callable[[], None]) -> None:
+        with self._io_lock:
+            if self._interrupt is interrupt:
+                self._interrupt = None
+
+    def _capture_loop(self, previous: threading.Thread | None = None) -> None:
+        if previous is not None:
+            previous.join()
+        backoff = self.BACKOFF_MIN_SECONDS
+        while self._active():
+            self._session_frames = 0
+            try:
+                self._capture_session()
+            except Exception as e:
+                if self._active():  # not just stop() closing the socket
+                    logger.error("Camera error for %s:%d: %s", self._ip, self._port, e)
+            if not self._active():
+                break
+
+            if self._session_was_healthy():
+                backoff = self.BACKOFF_MIN_SECONDS
+                delay = self.RESPAWN_SECONDS
+            else:
+                if not self._session_frames:
+                    with self._lock:
+                        self._frame = None
+                delay = backoff
+                backoff = min(backoff * 2, self.BACKOFF_MAX_SECONDS)
+            logger.info("Camera reconnecting to %s in %.1fs", self._ip, delay)
+            self._wait(delay)
+
+    def _capture_session(self) -> None:
+        if self._port == 322:
+            self._capture_rtsp()
+        else:
+            self._capture_raw_socket()
 
     # -- Raw TLS socket protocol (A1, P1, P1S on port 6000) --
 
@@ -115,68 +322,40 @@ class CameraStream:
         with socket.create_connection((self._ip, self._port), timeout=10) as sock:
             # Enable TCP keepalive to detect dead connections
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            ssl_sock = ctx.wrap_socket(sock, server_hostname=self._ip)
-            ssl_sock.write(auth_data)
-            ssl_sock.settimeout(60.0)
+            with ctx.wrap_socket(
+                sock, server_hostname=self._ip, do_handshake_on_connect=False
+            ) as ssl_sock:
+                interrupt = lambda: _close(ssl_sock)  # noqa: E731
+                if not self._set_interrupt(interrupt):
+                    return
+                try:
+                    ssl_sock.do_handshake()
+                    self._read_raw_socket(ssl_sock, auth_data)
+                finally:
+                    self._clear_interrupt(interrupt)
 
-            # Use a read buffer to handle partial reads properly
-            read_buf = bytearray()
+    def _read_raw_socket(self, ssl_sock: ssl.SSLSocket, auth_data: bytes) -> None:
+        ssl_sock.sendall(auth_data)
+        ssl_sock.settimeout(60.0)
+        # There is no separate auth reply: the first 16 bytes are the
+        # first frame's header.
+        read_buf = bytearray()
+        try:
+            _fill(ssl_sock.recv, read_buf, RAW_HEADER_SIZE)
+        except ConnectionError:
+            raise ConnectionError(f"Bad auth response: {len(read_buf)} bytes") from None
 
-            # Read auth response (first 16-byte header)
-            read_buf += self._sock_read(ssl_sock, 16 - len(read_buf))
-            if len(read_buf) < 16:
-                raise ConnectionError(f"Bad auth response: {len(read_buf)} bytes")
+        # Check for 24-byte newer protocol response
+        if read_buf[4:8] == b"\x3f\x01\x03\x00":
+            raise ConnectionError(
+                "Printer uses RTSP protocol. Set camera port to 322."
+            )
 
-            # Check for 24-byte newer protocol response
-            if read_buf[4:8] == b"\x3f\x01\x03\x00":
-                raise ConnectionError(
-                    "Printer uses RTSP protocol. Set camera port to 322."
-                )
-
-            self._connected = True
-            logger.info("Camera connected to %s via raw socket", self._ip)
-
-            while self._running:
-                # Ensure we have at least 16 bytes for the header
-                while len(read_buf) < 16:
-                    chunk = ssl_sock.recv(65536)
-                    if not chunk:
-                        raise ConnectionError("Connection closed")
-                    read_buf += chunk
-
-                # Parse header
-                payload_size = int.from_bytes(read_buf[0:4], byteorder="little")
-                read_buf = read_buf[16:]
-
-                if payload_size <= 0 or payload_size > 10_000_000:
-                    logger.warning("Bad payload size %d from %s, skipping", payload_size, self._ip)
-                    continue
-
-                # Read full payload (may already have some in read_buf)
-                while len(read_buf) < payload_size:
-                    chunk = ssl_sock.recv(65536)
-                    if not chunk:
-                        raise ConnectionError("Connection closed")
-                    read_buf += chunk
-
-                frame_data = bytes(read_buf[:payload_size])
-                read_buf = read_buf[payload_size:]
-
-                # Validate JPEG markers and store frame
-                if frame_data[:2] == b"\xff\xd8" and frame_data[-2:] == b"\xff\xd9":
-                    with self._lock:
-                        self._frame = frame_data
-
-    @staticmethod
-    def _sock_read(sock: ssl.SSLSocket, n: int) -> bytes:
-        """Read at least n bytes from socket."""
-        buf = b""
-        while len(buf) < n:
-            chunk = sock.recv(n - len(buf))
-            if not chunk:
-                return buf
-            buf += chunk
-        return buf
+        logger.info("Camera connected to %s via raw socket", self._ip)
+        for frame in raw_frames(ssl_sock.recv, read_buf):
+            if not self._active():
+                break
+            self._publish(frame)
 
     def _build_auth_packet(self) -> bytearray:
         auth = bytearray()
@@ -193,7 +372,7 @@ class CameraStream:
         auth += b"\x00" * (32 - len(self._access_code))
         return auth
 
-    # -- RTSP over TLS protocol (X1, H2C, H2D on port 322) --
+    # -- RTSP over TLS protocol (X1, H2C, H2D, P2 on port 322) --
 
     def _capture_rtsp(self) -> None:
         ffmpeg = _find_ffmpeg()
@@ -206,66 +385,101 @@ class CameraStream:
             return
 
         url = f"rtsps://bblp:{self._access_code}@{self._ip}:{self._port}/streaming/live/1"
-        cmd = [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel", "error",
-            "-rtsp_transport", "tcp",
-            "-tls_verify", "0",
-            "-timeout", "10000000",
-            "-i", url,
-            "-f", "mjpeg",
-            "-q:v", "5",
-            "-r", "10",
-            "-an",
-            "pipe:1",
-        ]
-
         proc = subprocess.Popen(
-            cmd,
+            rtsp_command(ffmpeg, url),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=10 * 1024 * 1024,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
+        # Drain stderr as it comes: a full pipe would block ffmpeg, which the
+        # watchdog would then mistake for a frozen camera.
+        stderr_tail: deque[bytes] = deque(maxlen=20)
+        drain = threading.Thread(target=_drain, args=(proc.stderr, stderr_tail), daemon=True)
+        drain.start()
+
+        def stderr_text() -> str:
+            drain.join(timeout=1)
+            if drain.is_alive():  # still appending; don't read a moving deque
+                return ""
+            return b"".join(stderr_tail).decode(errors="replace").strip()[-300:]
+
+        interrupt = lambda: _kill(proc)  # noqa: E731
+        watch: _FreezeWatch | None = None
         try:
-            time.sleep(1.0)
+            if not self._set_interrupt(interrupt):
+                return
+            if self._stopped.wait(self.FFMPEG_STARTUP_SECONDS):
+                return
             if proc.poll() is not None:
-                stderr = proc.stderr.read().decode(errors="replace").strip()
-                raise ConnectionError(f"ffmpeg exited: {stderr[:300]}")
+                raise ConnectionError(f"ffmpeg exited: {stderr_text()}")
 
-            self._connected = True
             logger.info("Camera connected to %s via ffmpeg RTSP", self._ip)
+            watch = _FreezeWatch(self.FROZEN_SECONDS, self.STILL_SCENE_SECONDS, self._frozen_on)
+            threading.Thread(
+                target=self._watch_ffmpeg, args=(proc, watch, self._stopped), daemon=True
+            ).start()
 
-            buf = b""
-            while self._running and proc.poll() is None:
-                chunk = proc.stdout.read(4096)
-                if not chunk:
+            for frame in jpeg_frames(proc.stdout.read):
+                if not self._active():
                     break
-                buf += chunk
+                watch.feed(frame)
+                self._publish(frame)
 
-                while True:
-                    soi = buf.find(b"\xff\xd8")
-                    if soi == -1:
-                        buf = b""
-                        break
-                    eoi = buf.find(b"\xff\xd9", soi + 2)
-                    if eoi == -1:
-                        buf = buf[soi:]
-                        break
-                    frame = buf[soi : eoi + 2]
-                    buf = buf[eoi + 2 :]
-                    with self._lock:
-                        self._frame = frame
-
-            if proc.poll() is not None and proc.returncode != 0:
-                stderr = proc.stderr.read().decode(errors="replace").strip()
+            if self._active() and not watch.tripped:
+                try:
+                    returncode = proc.wait(timeout=2)  # stdout hit EOF; let it exit
+                except subprocess.TimeoutExpired:
+                    returncode = None
+                stderr = stderr_text() if returncode else ""
                 if stderr:
-                    logger.error("ffmpeg error for %s: %s", self._ip, stderr[:300])
+                    logger.error("ffmpeg error for %s: %s", self._ip, stderr)
         finally:
+            self._clear_interrupt(interrupt)
+            if watch is not None and threading.current_thread() is self._thread:
+                self._frozen_on = watch.frozen_on  # not from a superseded run
             if proc.poll() is None:
                 proc.terminate()
                 try:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     proc.kill()
+            proc.stdout.close()
+
+    def _watch_ffmpeg(
+        self, proc: subprocess.Popen, watch: _FreezeWatch, stopped: threading.Event
+    ) -> None:
+        """Kill ffmpeg when the picture stops changing. The capture loop respawns it."""
+        while not stopped.is_set() and proc.poll() is None:
+            if watch.frozen():
+                logger.warning(
+                    "Camera %s: no new frame for %.0fs, restarting ffmpeg", self._ip, watch.timeout
+                )
+                watch.trip()
+                _kill(proc)
+                return
+            stopped.wait(self.WATCH_INTERVAL_SECONDS)
+
+
+def _drain(pipe, tail: deque[bytes]) -> None:
+    """Read a pipe to EOF, keeping only its last lines."""
+    with pipe:
+        for line in iter(pipe.readline, b""):
+            tail.append(line)
+
+
+def _close(sock: socket.socket) -> None:
+    """Wake a recv blocked in another thread. On Windows shutdown alone doesn't."""
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    sock.close()
+
+
+def _kill(proc: subprocess.Popen) -> None:
+    try:
+        if proc.poll() is None:
+            proc.kill()
+    except OSError:
+        pass
