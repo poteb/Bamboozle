@@ -337,40 +337,14 @@ class BamboozleApp {
 
         const isPrinting = s.gcode_state === 'RUNNING';
         const isPaused = s.gcode_state === 'PAUSE';
-        const hasJob = isPrinting || isPaused;
 
         // Update job info section (always exists, just update contents)
         const jobSection = card.querySelector('.job-section');
-        if (jobSection) {
-            if (hasJob) {
-                const eta = s.remaining_minutes > 0
-                    ? `${Math.floor(s.remaining_minutes / 60)}h ${s.remaining_minutes % 60}m`
-                    : '--';
-                const etaClass = s.remaining_minutes > 0 && s.remaining_minutes < 10 ? 'eta-green'
-                    : s.remaining_minutes > 0 && s.remaining_minutes < 30 ? 'eta-yellow' : '';
+        if (jobSection) jobSection.innerHTML = this.jobSectionHtml(s);
 
-                jobSection.innerHTML = `
-                    <div class="file-name">${this.esc(s.file_name || 'Unknown file')}</div>
-                    ${this._thumbnailNoteHtml(s)}
-                    <div class="progress-row">
-                        <progress value="${s.progress}" max="100"></progress>
-                        <span class="progress-pct">${s.progress}%</span>
-                    </div>
-                    <div class="detail-row">
-                        <span class="eta-value ${etaClass}">ETA: ${eta}</span>
-                    </div>`;
-            } else {
-                jobSection.innerHTML = '';
-            }
-        }
-
-        // Update temperatures
-        const temps = card.querySelectorAll('.temp-value');
-        if (temps.length >= 3) {
-            temps[0].innerHTML = `${s.nozzle_temp != null ? Math.round(s.nozzle_temp) : '--'}&deg;C`;
-            temps[1].innerHTML = `${s.bed_temp != null ? Math.round(s.bed_temp) : '--'}&deg;C`;
-            temps[2].innerHTML = `${s.chamber_temp != null ? Math.round(s.chamber_temp) : '--'}&deg;C`;
-        }
+        // Update temperatures (tiles come and go: second nozzle, chamber)
+        const tempsRow = card.querySelector('.temps-row');
+        if (tempsRow) tempsRow.innerHTML = this.tempsRowHtml(s);
 
         // Update speed
         let speedRow = card.querySelector('.speed-row');
@@ -382,7 +356,7 @@ class BamboozleApp {
                 const tempsRow = bottom?.querySelector('.temps-row');
                 if (tempsRow) tempsRow.after(speedRow);
             }
-            speedRow.innerHTML = `<span class="temp-label">Speed</span><span>${s.print_speed}%</span>`;
+            speedRow.innerHTML = `<span class="temp-label">Speed</span><span>${this.esc(this.speedText(s))}</span>`;
         } else if (speedRow) {
             speedRow.remove();
         }
@@ -393,12 +367,12 @@ class BamboozleApp {
         if (filamentsHtml) {
             if (!filamentsRow) {
                 const bottom = card.querySelector('.card-bottom');
-                const actionsEl = bottom?.querySelector('.actions');
-                if (bottom && actionsEl) {
+                // Before Details (or .actions), to match the initial render order.
+                const nextEl = bottom?.querySelector('.card-details') || bottom?.querySelector('.actions');
+                if (bottom && nextEl) {
                     bottom.insertAdjacentHTML('beforeend', filamentsHtml);
-                    // The new row was appended after .actions; move it before .actions to match initial render order.
                     filamentsRow = card.querySelector('.filaments-row');
-                    if (filamentsRow) bottom.insertBefore(filamentsRow, actionsEl);
+                    if (filamentsRow) bottom.insertBefore(filamentsRow, nextEl);
                 }
             } else {
                 // Replace contents in place to update colors/tooltips, and refresh class to reflect expanded state.
@@ -447,6 +421,16 @@ class BamboozleApp {
 
         const refreshBtn = card.querySelector('.refresh-btn');
         if (refreshBtn) refreshBtn.style.display = s.online ? '' : 'none';
+
+        // Update the Details disclosure; only its body, so an open one stays open.
+        const details = card.querySelector('.card-details');
+        if (details) {
+            const items = this.detailItems(s);
+            details.hidden = items.length === 0;
+            const body = details.querySelector('.card-details-body');
+            const html = this.detailsBodyHtml(items);
+            if (body && body.innerHTML !== html) body.innerHTML = html;
+        }
     }
 
     _cameraStreamHtml(id) {
@@ -571,7 +555,7 @@ class BamboozleApp {
         }
     }
 
-    _filamentTooltip(f) {
+    _filamentTooltip(f, s = {}) {
         const parts = [];
         if (f.color) {
             const colorLabel = colorNameFromHex(f.color) || f.color;
@@ -582,7 +566,7 @@ class BamboozleApp {
         if (f.source === 'external') {
             parts.push('External spool');
         } else {
-            parts.push(`AMS ${(f.ams_index ?? 0) + 1} · Slot ${(f.tray_index ?? 0) + 1}`);
+            parts.push(`${this.amsName(s, f.ams_index ?? 0)} · Slot ${(f.tray_index ?? 0) + 1}`);
         }
         return parts.join(' · ');
     }
@@ -623,7 +607,7 @@ class BamboozleApp {
             const items = group.items.map(f => {
                 const cls = f.source === 'external' ? 'filament-square external' : 'filament-square';
                 const bg = f.color || 'transparent';
-                const tip = this.esc(this._filamentTooltip(f));
+                const tip = this.esc(this._filamentTooltip(f, s));
                 const square = `<span class="${cls}" style="background:${bg}" title="${tip}"></span>`;
                 if (expanded) {
                     const label = this.esc(this._filamentLabelExpanded(f));
@@ -633,7 +617,7 @@ class BamboozleApp {
             }).join('');
             let header = '';
             if (expanded) {
-                const headerText = group.kind === 'external' ? 'External' : `AMS ${group.amsIndex + 1}`;
+                const headerText = group.kind === 'external' ? 'External' : this.amsHeader(s, group.amsIndex);
                 header = `<div class="filament-group-header">${this.esc(headerText)}</div>`;
             }
             return `<div class="filament-group">${header}${items}</div>`;
@@ -669,16 +653,6 @@ class BamboozleApp {
         const statusClass = this.getStatusClass(s);
         const statusLabel = this.getStatusLabel(s);
 
-        const eta = s.remaining_minutes > 0
-            ? `${Math.floor(s.remaining_minutes / 60)}h ${s.remaining_minutes % 60}m`
-            : '--';
-        const etaClass = s.remaining_minutes > 0 && s.remaining_minutes < 10 ? 'eta-green'
-            : s.remaining_minutes > 0 && s.remaining_minutes < 30 ? 'eta-yellow' : '';
-
-        const nozzle = s.nozzle_temp != null ? `${Math.round(s.nozzle_temp)}` : '--';
-        const bed = s.bed_temp != null ? `${Math.round(s.bed_temp)}` : '--';
-        const chamber = s.chamber_temp != null ? `${Math.round(s.chamber_temp)}` : '--';
-
         const isPrinting = s.gcode_state === 'RUNNING';
         const isPaused = s.gcode_state === 'PAUSE';
         const hasJob = isPrinting || isPaused;
@@ -696,6 +670,7 @@ class BamboozleApp {
 
         const filamentsHtml = this._renderFilaments(s, id);
         const notice = this.cardNotice(s);
+        const details = this.detailItems(s);
 
         let actionsHtml = '';
         if (hasJob) {
@@ -725,8 +700,39 @@ class BamboozleApp {
             ${cameraHtml}
             <div class="card-bottom">
                 <div class="card-notice${notice && notice.quiet ? ' quiet' : ''}" role="status" title="${notice && !notice.quiet ? this.esc(notice.title) : ''}" data-key="${this.esc(this._noticeKey(notice))}">${this.noticeHtml(notice)}</div>
-                <div class="job-section">${hasJob ? `
+                <div class="job-section">${this.jobSectionHtml(s)}</div>
+                <div class="temps-row">${this.tempsRowHtml(s)}</div>
+                ${s.online && s.print_speed ? `
+                    <div class="speed-row">
+                        <span class="temp-label">Speed</span>
+                        <span>${this.esc(this.speedText(s))}</span>
+                    </div>
+                ` : ''}
+                ${filamentsHtml}
+                <details class="card-details"${details.length ? '' : ' hidden'}>
+                    <summary>Details</summary>
+                    <div class="card-details-body">${this.detailsBodyHtml(details)}</div>
+                </details>
+                <div class="actions">${actionsHtml}</div>
+            </div>
+        `;
+    }
+
+    // Inner HTML of the job section: the stage (also while preparing), then
+    // file, progress and ETA during a job.
+    jobSectionHtml(s) {
+        const stage = this.stageText(s);
+        const stageHtml = stage ? `<div class="stage-line">${this.esc(stage)}</div>` : '';
+        if (s.gcode_state !== 'RUNNING' && s.gcode_state !== 'PAUSE') return stageHtml;
+
+        const eta = s.remaining_minutes > 0
+            ? `${Math.floor(s.remaining_minutes / 60)}h ${s.remaining_minutes % 60}m`
+            : '--';
+        const etaClass = s.remaining_minutes > 0 && s.remaining_minutes < 10 ? 'eta-green'
+            : s.remaining_minutes > 0 && s.remaining_minutes < 30 ? 'eta-yellow' : '';
+        return `
                     <div class="file-name">${this.esc(s.file_name || 'Unknown file')}</div>
+                    ${stageHtml}
                     ${this._thumbnailNoteHtml(s)}
                     <div class="progress-row">
                         <progress value="${s.progress}" max="100"></progress>
@@ -734,32 +740,98 @@ class BamboozleApp {
                     </div>
                     <div class="detail-row">
                         <span class="eta-value ${etaClass}">ETA: ${eta}</span>
-                    </div>
-                ` : ''}</div>
-                <div class="temps-row">
+                    </div>`;
+    }
+
+    // What the printer is doing, when that says more than the status label:
+    // '' for plain printing (stage 0) and when idle.
+    stageText(s) {
+        if (!s.online || s.stage == null || s.stage === 0) return '';
+        return s.stage_name || '';
+    }
+
+    // "220 / 220°C"; the target only while one is set.
+    tempHtml(temp, target) {
+        const now = temp != null ? Math.round(temp) : '--';
+        const tgt = target > 0 ? `<span class="temp-target"> / ${Math.round(target)}</span>` : '';
+        return `${now}${tgt}&deg;C`;
+    }
+
+    // Temperature tiles: each nozzle (left, right on the H2C / H2D), the bed,
+    // and the chamber where the printer has a sensor.
+    tempItems(s) {
+        const sideLabel = { left: 'Nozzle L', right: 'Nozzle R' };
+        const nozzles = Array.isArray(s.nozzles) && s.nozzles.length
+            ? s.nozzles
+            : [{ side: '', temp: s.nozzle_temp, target: s.nozzle_target }];
+        const items = nozzles.map((n) => ({
+            label: sideLabel[n.side] || 'Nozzle',
+            html: this.tempHtml(n.temp, n.target),
+        }));
+        items.push({ label: 'Bed', html: this.tempHtml(s.bed_temp, s.bed_target) });
+        if (s.chamber_temp != null) {
+            items.push({ label: 'Chamber', html: this.tempHtml(s.chamber_temp, s.chamber_target) });
+        }
+        return items;
+    }
+
+    tempsRowHtml(s) {
+        return this.tempItems(s).map((i) => `
                     <div class="temp-item">
-                        <span class="temp-label">Nozzle</span>
-                        <span class="temp-value">${nozzle}&deg;C</span>
-                    </div>
-                    <div class="temp-item">
-                        <span class="temp-label">Bed</span>
-                        <span class="temp-value">${bed}&deg;C</span>
-                    </div>
-                    <div class="temp-item">
-                        <span class="temp-label">Chamber</span>
-                        <span class="temp-value">${chamber}&deg;C</span>
-                    </div>
-                </div>
-                ${s.online && s.print_speed ? `
-                    <div class="speed-row">
-                        <span class="temp-label">Speed</span>
-                        <span>${s.print_speed}%</span>
-                    </div>
-                ` : ''}
-                ${filamentsHtml}
-                <div class="actions">${actionsHtml}</div>
-            </div>
-        `;
+                        <span class="temp-label">${this.esc(i.label)}</span>
+                        <span class="temp-value">${i.html}</span>
+                    </div>`).join('');
+    }
+
+    speedText(s) {
+        return s.speed_name ? `${s.speed_name} · ${s.print_speed}%` : `${s.print_speed}%`;
+    }
+
+    amsName(s, index) {
+        const unit = (s.ams_units || []).find((u) => u.index === index);
+        if (unit && unit.name) return unit.name;
+        return index >= 128 ? `AMS HT ${index - 127}` : `AMS ${index + 1}`;
+    }
+
+    // Expanded filament group header: "AMS 1 · 35% RH · 28°C".
+    amsHeader(s, index) {
+        const unit = (s.ams_units || []).find((u) => u.index === index) || {};
+        const parts = [this.amsName(s, index)];
+        if (unit.humidity != null) parts.push(`${unit.humidity}% RH`);
+        if (unit.temp != null) parts.push(`${Math.round(unit.temp)}°C`);
+        return parts.join(' · ');
+    }
+
+    // [label, value] rows for the Details disclosure; unknown fields are left out.
+    detailItems(s) {
+        if (!s.online) return [];
+        const items = [];
+        const f = s.fans || {};
+        const fans = [['Part', f.part], ['Aux', f.aux], ['Chamber', f.chamber], ['Heatbreak', f.heatbreak]]
+            .filter(([, v]) => v != null)
+            .map(([name, v]) => `${name} ${v}%`);
+        if (fans.length) items.push(['Fans', fans.join(' · ')]);
+
+        const nozzles = (s.nozzles || []).filter((n) => n.type || n.diameter != null);
+        const describe = (n) => [n.type, n.diameter != null ? `${n.diameter} mm` : ''].filter(Boolean);
+        if (nozzles.length === 1 && !nozzles[0].side) {
+            items.push(['Nozzle', describe(nozzles[0]).join(' · ')]);
+        } else if (nozzles.length) {
+            const side = { left: 'L', right: 'R' };
+            items.push(['Nozzles', nozzles
+                .map((n) => [side[n.side] || '', ...describe(n)].filter(Boolean).join(' '))
+                .join(' · ')]);
+        }
+        if (s.wifi_dbm != null) items.push(['Wi-Fi', `${s.wifi_dbm} dBm`]);
+        if (s.door_open != null) items.push(['Door', s.door_open ? 'Open' : 'Closed']);
+        if (s.sdcard != null) items.push(['SD card', s.sdcard ? 'Inserted' : 'None']);
+        if (s.firmware) items.push(['Firmware', s.firmware]);
+        return items;
+    }
+
+    detailsBodyHtml(items) {
+        return items.map(([label, value]) =>
+            `<span class="detail-label">${this.esc(label)}</span><span>${this.esc(value)}</span>`).join('');
     }
 
     // Why the job card has no preview picture, or ''.
