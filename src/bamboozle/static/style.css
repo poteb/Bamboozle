@@ -71,6 +71,33 @@
     font-size: 0.85rem;
 }
 
+/* WebSocket reconnecting marker (right end of the toolbar) */
+.ws-status {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    color: var(--pico-muted-color);
+}
+
+/* Stays rendered while empty (takes no space) so screen readers keep the
+   role="status" live region and announce the text when it appears. */
+.ws-status:not(:empty)::before {
+    content: "";
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: var(--status-paused);
+    animation: pulse 2s infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .ws-status:not(:empty)::before {
+        animation: none;
+    }
+}
+
 /* Printer Grid */
 .printer-grid {
     display: grid;

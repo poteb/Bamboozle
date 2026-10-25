@@ -1,3 +1,7 @@
+// The reconnecting marker stays hidden this long after page load so a normal
+// (fast) WS connect doesn't flash it.
+const WS_MARKER_GRACE_MS = 1000;
+
 const STATUS_PRIORITY = {
     'RUNNING': 0, 'PAUSE': 1, 'PREPARE': 2, 'FINISH': 3, 'FAILED': 4, 'IDLE': 5, 'UNKNOWN': 6,
 };
@@ -137,7 +141,53 @@ class BamboozleApp {
         this._initSortControls();
         this._updateAllCamsToggle();
 
-        if (this.grid) this.connect();
+        // Set once any WS init/update has been applied; the HTTP initial load
+        // must not overwrite newer WS data after that.
+        this._wsStateReceived = false;
+        // Armed after WS_MARKER_GRACE_MS; see _updateWsMarker.
+        this._wsMarkerArmed = false;
+
+        if (this.grid) {
+            this._loadInitial();
+            this.connect();
+            setTimeout(() => {
+                this._wsMarkerArmed = true;
+                this._updateWsMarker();
+            }, WS_MARKER_GRACE_MS);
+        }
+    }
+
+    // Plain HTTP isn't subject to the browser's WebSocket reconnect throttling
+    // (Firefox can delay a new WS by up to ~60s), so render from it first.
+    async _loadInitial() {
+        try {
+            const res = await fetch('/api/printers');
+            if (!res.ok) return;
+            const data = await res.json();
+            this._applyInitialPrinters(data.printers);
+        } catch {
+            // Stay silent; the WS init will fill the dashboard.
+        }
+    }
+
+    _applyInitialPrinters(list) {
+        if (this._wsStateReceived || !Array.isArray(list)) return;
+        for (const state of list) {
+            if (state && state.printer_id) this.printers[state.printer_id] = state;
+        }
+        this.render();
+    }
+
+    _updateWsMarker() {
+        const marker = document.getElementById('ws-status');
+        if (!marker) return;
+        // Empty = invisible (see .ws-status in style.css); setting the text
+        // lets the role="status" live region announce it.
+        marker.textContent = this._wsMarkerArmed && !this._wsOpen() ? 'Reconnecting…' : '';
+    }
+
+    _wsOpen() {
+        return !!this.ws && this.ws.readyState === WebSocket.OPEN;
     }
 
     _initSortControls() {
@@ -208,13 +258,20 @@ class BamboozleApp {
     connect() {
         const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
         this.ws = new WebSocket(`${proto}//${location.host}/ws`);
+        this.ws.onopen = () => this._updateWsMarker();
         this.ws.onmessage = (e) => this.onMessage(JSON.parse(e.data));
-        this.ws.onclose = () => setTimeout(() => this.connect(), 2000);
+        this.ws.onclose = () => {
+            this._updateWsMarker();
+            setTimeout(() => this.connect(), 2000);
+        };
         this.ws.onerror = () => {};
     }
 
     onMessage(msg) {
         if (msg.type === 'init' || msg.type === 'update') {
+            this._wsStateReceived = true;
+            // init is the full set: drop printers removed while we weren't listening.
+            if (msg.type === 'init') this.printers = {};
             for (const [id, state] of Object.entries(msg.printers)) {
                 this.printers[id] = state;
             }
@@ -741,7 +798,7 @@ class BamboozleApp {
                 body: JSON.stringify({enabled}),
             });
             const json = await res.json();
-            if (json.success) {
+            if (json.success && this.printers[printerId]) {
                 this.printers[printerId].camera_enabled = json.camera_enabled;
                 if (!json.camera_enabled) {
                     this.printers[printerId].camera_available = false;
@@ -755,13 +812,50 @@ class BamboozleApp {
     }
 
     sendCommand(printerId, action, params = {}) {
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        if (this._wsOpen()) {
             this.ws.send(JSON.stringify({
                 type: 'command',
                 printer_id: printerId,
                 action,
                 params,
             }));
+            return;
+        }
+        // Cards can render from HTTP long before the WS opens, so don't drop
+        // the click: use the matching REST endpoint instead.
+        return this._sendCommandHttp(printerId, action, params);
+    }
+
+    async _sendCommandHttp(printerId, action, params) {
+        const route = {
+            pause: ['pause'],
+            resume: ['resume'],
+            stop: ['stop'],
+            light_on: ['light', { on: true }],
+            light_off: ['light', { on: false }],
+            set_speed: ['speed', { level: params.level }],
+        }[action];
+        if (!route) {
+            this.showToast('Not connected — reconnecting', 'error');
+            return;
+        }
+        const [path, body] = route;
+        const opts = { method: 'POST' };
+        if (body) {
+            opts.headers = { 'Content-Type': 'application/json' };
+            opts.body = JSON.stringify(body);
+        }
+        try {
+            const res = await fetch(`/api/printers/${encodeURIComponent(printerId)}/${path}`, opts);
+            if (!res.ok) {
+                this.showToast(`Command failed (${res.status})`, 'error');
+                return;
+            }
+            const json = await res.json();
+            this.showToast(json.message || (json.success ? 'Done' : 'Command failed'),
+                json.success ? 'success' : 'error');
+        } catch {
+            this.showToast('Command failed: server unreachable', 'error');
         }
     }
 
