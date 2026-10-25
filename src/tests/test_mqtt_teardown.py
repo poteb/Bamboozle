@@ -33,6 +33,9 @@ class FakePaho:
         self.calls.append("disconnect")
         self.callbacks_at_disconnect = (self.on_connect, self.on_message, self.on_disconnect)
 
+    def is_connected(self):
+        return False
+
     def loop_stop(self):
         self.calls.append("loop_stop")
         if self._release is not None:
@@ -75,6 +78,42 @@ def test_retire_disconnects_again_after_the_thread_stops():
     assert paho.calls == ["disconnect", "loop_stop", "disconnect"]
 
 
+class LateHandshakePaho(FakePaho):
+    """paho mid-reconnect: our first disconnect finds no socket, then the
+    handshake completes. With QoS 1 messages unacked, paho's loop ignores
+    loop_stop's terminate flag until the connection actually closes."""
+
+    def __init__(self):
+        super().__init__()
+        self.connected = False
+        self.closed = threading.Event()
+
+    def disconnect(self):
+        super().disconnect()
+        if self.connected:
+            self.connected = False
+            self.closed.set()  # DISCONNECT sent; the broker drops us
+        elif self.calls.count("disconnect") == 1:
+            self.connected = True  # the handshake finishes right after
+
+    def is_connected(self):
+        return self.connected
+
+    def loop_stop(self):
+        self.calls.append("loop_stop")
+        self.closed.wait(5)
+        self.stopped.set()
+
+
+def test_retire_closes_a_handshake_that_completes_after_the_first_disconnect():
+    paho = LateHandshakePaho()
+    thread = mqtt.retire(_printer_with(paho))
+    thread.join(3)
+    assert not thread.is_alive()
+    assert paho.closed.is_set()
+    assert paho.stopped.is_set()
+
+
 def test_retire_keeps_going_when_disconnect_fails():
     paho = FakePaho()
 
@@ -114,10 +153,10 @@ def blocked_teardown(monkeypatch):
     """Every retired client blocks in loop_stop until the test ends."""
     release = threading.Event()
     clients = []
-    orig_init = PrinterConnection._new_printer
+    orig_new_printer = PrinterConnection._new_printer
 
     def new_printer(self):
-        printer = orig_init(self)
+        printer = orig_new_printer(self)
         paho = FakePaho(release)
         clients.append(paho)
         printer.mqtt_client._client = paho

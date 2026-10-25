@@ -83,7 +83,7 @@ def test_nothing_is_queued_while_the_session_is_down(action):
     assert _published(printer) == []
 
 
-def _manager_with_blocked_printer(monkeypatch):
+def _manager_with_blocked_printer():
     conn = PrinterConnection(
         PrinterConfig(id="h2c", name="H2C", ip="192.168.0.102", access_code="x", serial=SERIAL))
     conn.printer.mqtt_client._client = RecordingPaho()
@@ -94,15 +94,15 @@ def _manager_with_blocked_printer(monkeypatch):
     return mgr, conn
 
 
-def test_refresh_works_on_a_printer_refusing_control_commands(monkeypatch):
+def test_refresh_works_on_a_printer_refusing_control_commands():
     """pushall is a query, which still works without Developer Mode."""
-    mgr, conn = _manager_with_blocked_printer(monkeypatch)
+    mgr, conn = _manager_with_blocked_printer()
     ok, msg = asyncio.run(mgr.execute_command("h2c", "refresh"))
     assert ok is True
     assert "Developer Mode" not in msg
 
 
-def test_refresh_endpoint(monkeypatch):
+def test_refresh_endpoint():
     calls = []
 
     class Mgr:

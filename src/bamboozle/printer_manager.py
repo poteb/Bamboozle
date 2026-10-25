@@ -997,30 +997,28 @@ class PrinterManager:
             case "stop":
                 return printer.stop_print(), "Print stopped"
             case "light_on":
-                return PrinterManager._sent(PrinterManager._set_light(printer, "on"), "Light turned on")
+                return PrinterManager._send(printer, mqtt.light_requests("on"), "Light turned on")
             case "light_off":
-                return PrinterManager._sent(PrinterManager._set_light(printer, "off"), "Light turned off")
+                return PrinterManager._send(printer, mqtt.light_requests("off"), "Light turned off")
             case "set_light":
                 mode = params.get("mode", "on")
-                return PrinterManager._sent(PrinterManager._set_light(printer, mode), f"Light {mode}")
+                return PrinterManager._send(printer, mqtt.light_requests(mode), f"Light {mode}")
             case "set_speed":
                 lvl = params.get("level", 1)
                 return printer.set_print_speed_lvl(speed_lvl=lvl), f"Speed set to level {lvl}"
             case "refresh":
-                return PrinterManager._sent(
-                    mqtt.publish(printer, mqtt.pushall_request()), "Refresh requested"
-                )
+                return PrinterManager._send(printer, [mqtt.pushall_request()], "Refresh requested")
             case _:
                 return False, f"Unknown action: {action}"
 
     @staticmethod
-    def _sent(ok: bool, msg: str) -> tuple[bool, str]:
-        """Result of an `mqtt.publish` request (False = session down, not sent)."""
-        return (True, msg) if ok else (False, "Not sent: printer not connected")
+    def _send(printer: bl.Printer, requests: list[dict], msg: str) -> tuple[bool, str]:
+        """Publish requests ourselves, bypassing the library (QoS 1, never waits).
 
-    @staticmethod
-    def _set_light(printer: bl.Printer, mode: str) -> bool:
-        """`ledctrl` on both chamber LED nodes (the library's helper sends no
-        `led_node`, which not every model accepts)."""
-        results = [mqtt.publish(printer, req) for req in mqtt.light_requests(mode)]
-        return all(results)
+        The light goes to both chamber LED nodes this way; the library's helper
+        sends no `led_node`, which not every model accepts.
+        """
+        results = [mqtt.publish(printer, req) for req in requests]
+        if all(results):
+            return True, msg
+        return False, "Not sent: printer not connected"

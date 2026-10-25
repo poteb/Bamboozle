@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 INFLIGHT_WINDOW = 1000
 # Printers busy broadcasting may ignore QoS 0 requests.
 REQUEST_QOS = 1
+# How long a teardown keeps closing late handshakes before leaving the
+# (daemon) network thread to itself.
+TEARDOWN_WATCH_SECONDS = 60.0
 
 _sequence = itertools.count(1)
 _teardowns: set[threading.Thread] = set()
@@ -65,7 +68,9 @@ def publish(printer: Any, payload: dict) -> bool:
     """Queue one request for the printer; never waits for delivery.
 
     Nothing is queued while the session is down: paho would replay a QoS 1
-    request on reconnect, long after the user gave up on it.
+    request on reconnect, long after the user gave up on it. (One sent while
+    up but never acked can still be replayed if paho reconnects by itself
+    within the grace period; `reset_session` drops it with the old client.)
     """
     mc = printer.mqtt_client
     if not mc.is_connected():
@@ -75,9 +80,10 @@ def publish(printer: Any, payload: dict) -> bool:
 
 
 def retire(printer: Any) -> threading.Thread | None:
-    """End the printer's MQTT session without blocking the caller.
+    """End the printer's MQTT session without waiting on paho.
 
-    Callbacks are cleared first, so a CONNACK still in flight can't
+    Callbacks are cleared first (each setter waits at most for a callback
+    already running on paho's thread), so a CONNACK still in flight can't
     resubscribe or report into a connection that has been replaced. The
     DISCONNECT (which also stops paho's auto-reconnect) and the join of the
     network thread run on a daemon thread. Returns that thread, or None when
@@ -102,13 +108,30 @@ def retire(printer: Any) -> threading.Thread | None:
 
 
 def _shutdown(client: Any) -> None:
-    for step in (client.disconnect, client.loop_stop, client.disconnect):
-        # The second disconnect closes a handshake that completed while the
-        # first one ran (it then found no socket and couldn't send anything).
-        try:
-            step()
-        except Exception as e:
-            logger.debug("MQTT teardown step %s failed: %s", step.__name__, e)
+    _attempt(client.disconnect)
+    # If paho was mid-reconnect, that disconnect found no socket and the
+    # handshake may complete afterwards. paho's loop then ignores loop_stop's
+    # terminate flag while QoS 1 requests are unacked, so watch the join and
+    # disconnect again whenever the session shows up connected.
+    stopper = threading.Thread(
+        target=_attempt, args=(client.loop_stop,), name="mqtt-loop-stop", daemon=True
+    )
+    stopper.start()
+    deadline = time.monotonic() + TEARDOWN_WATCH_SECONDS
+    while stopper.is_alive() and time.monotonic() < deadline:
+        stopper.join(0.2)
+        if _attempt(client.is_connected):
+            _attempt(client.disconnect)
+    # The loop may exit on the terminate flag with the session still open.
+    _attempt(client.disconnect)
+
+
+def _attempt(step: Any) -> Any:
+    try:
+        return step()
+    except Exception as e:
+        logger.debug("MQTT teardown step %s failed: %s", getattr(step, "__name__", step), e)
+        return None
 
 
 def wait_for_teardowns(timeout: float) -> None:
