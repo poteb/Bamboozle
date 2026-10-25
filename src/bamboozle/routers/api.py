@@ -139,7 +139,7 @@ async def toggle_light(request: Request, printer_id: str, body: dict) -> dict:
 async def set_speed(request: Request, printer_id: str, body: dict) -> dict:
     manager = request.app.state.manager
     return _result(await manager.execute_command(
-        printer_id, "set_speed", {"level": body.get("level", 1)}
+        printer_id, "set_speed", {"level": body.get("level")}
     ))
 
 

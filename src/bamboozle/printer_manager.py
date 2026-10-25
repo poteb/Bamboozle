@@ -137,6 +137,12 @@ class PrinterConnection:
         self.on_change: Callable[[], None] = lambda: None
         self.on_reconnect_due: Callable[[], None] = lambda: None
         self._closed = False  # disconnect() was called: this connection is done
+        # After a working session dropped: until this (monotonic) time the card
+        # keeps showing the kept report while a fresh session connects.
+        self._blip_until = 0.0
+        # Some session of this connection delivered reports (the serial is
+        # right), so later silence reads as "stale", not "check the serial".
+        self._ever_reported = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._waiters: set[_Waiter] = set()
         self.thumbnail: bytes | None = None
@@ -193,6 +199,7 @@ class PrinterConnection:
             return  # a retired client's callback that was already running
         self._last_report = time.monotonic()
         self._reports += 1
+        self._ever_reported = True
         self._probed = False
         self._down_reason = ""
         self._to_loop(self._ingest, client, payload)
@@ -268,19 +275,24 @@ class PrinterConnection:
         (a reconnect would replay unacked commands, see mqtt.py): retire it
         and start a fresh one.
 
-        A session that was delivering reports reconnects right away and keeps
-        its merged report (the new session's pushall refreshes it), so a Wi-Fi
-        blip doesn't blank the card. Anything else (never logged in, never
-        reported, or dropped while connect() settles, which then fails) backs
-        off as usual.
+        A session that was delivering reports keeps its merged report, and the
+        card stays as it was for up to MQTT_GRACE_SECONDS while a fresh session
+        connects (its pushall refreshes the report), so a Wi-Fi blip doesn't
+        blank or "offline" the card. If it had been up for STALE_SECONDS it
+        reconnects right away; a session that keeps dropping sooner backs off.
+        Anything else (never logged in, never reported, or dropped while
+        connect() settles, which then fails) backs off as usual.
         """
         if client is not self.client or self._closed:
             return
         if client.connected_once and self._reports and not self._connecting:
             logger.warning("%s: MQTT session to %s dropped; reconnecting", self.cfg.name, self.cfg.ip)
+            lived = time.monotonic() - self._session_started
             self._reset_now(keep_report=True)
-            self._retry_at = time.monotonic()  # no backoff for a session that worked
-            self.on_reconnect_due()
+            self._blip_until = time.monotonic() + self.MQTT_GRACE_SECONDS
+            if lived >= self.STALE_SECONDS:
+                self._retry_at = time.monotonic()  # it worked: no backoff
+                self.on_reconnect_due()
         else:
             # paho's thread is gone, so don't wait out the grace period.
             self._reset_now()
@@ -301,10 +313,13 @@ class PrinterConnection:
         reachable = await asyncio.to_thread(
             discovery.tcp_reachable, self.cfg.ip, discovery.MQTT_PORT
         )
+        if self._closed:
+            return False  # removed or replaced while probing
         if not reachable:
             logger.warning("%s: printer unreachable at %s", self.cfg.name, self.cfg.ip)
             self._auth_rejected = False  # says nothing about the code any more
             self._down_reason = ""  # ...or about the serial
+            self._forget_kept_report()  # it's gone, not blipping
             self._schedule_retry()
             return False
         self._login_answered = False
@@ -384,7 +399,7 @@ class PrinterConnection:
             return
         silence = self._silence()
         if silence >= self.STALE_SECONDS:
-            reason = protocol.STALE if self._reports else protocol.NO_REPORTS
+            reason = protocol.STALE if self._reports or self._ever_reported else protocol.NO_REPORTS
             if reason != self._down_reason:
                 if reason == protocol.NO_REPORTS:
                     logger.warning(
@@ -461,17 +476,32 @@ class PrinterConnection:
         self._schedule_retry()
         self.client = self._new_client()
         if not keep_report:
-            self.report.reset()
+            self._forget_kept_report()
         self._full_seen = False
         # A new session has no version reply yet: ask the new one right away.
         self._version_asked_at = -math.inf
         self._version_wait = self.VERSION_RETRY_SECONDS
         self._changed()
 
+    def _forget_kept_report(self) -> None:
+        self.report.reset()
+        self._blip_until = 0.0
+
+    def _in_blip(self) -> bool:
+        """A working session just dropped and a fresh one is on its way."""
+        if not self._blip_until:
+            return False
+        if self._connected or self._auth_rejected or time.monotonic() >= self._blip_until:
+            if not self._connected:
+                self._forget_kept_report()  # the grace ran out: it's really down
+            self._blip_until = 0.0
+            return False
+        return True
+
     async def read_state(self) -> PrinterState:
         """Rebuild `state` from the merged report (and the connection's own
         knowledge: online, camera, thumbnail, why it's down)."""
-        if not self._connected or self._auth_rejected:
+        if (not self._connected or self._auth_rejected) and not self._in_blip():
             # Never started MQTT (e.g. unreachable) or the login was refused.
             self.state.online = False
             self.state.last_error = (

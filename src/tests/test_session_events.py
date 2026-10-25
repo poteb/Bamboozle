@@ -33,25 +33,97 @@ def _drop(client):
     client._on_disconnect(client.paho, None, None, 7, None)
 
 
-def test_a_dropped_session_reconnects_at_once_and_keeps_its_card(lan):
+FULL = {"print": {"command": "push_status", "msg": 0, "gcode_state": "RUNNING", "nozzle_temper": 200}}
+
+
+def test_a_dropped_session_reconnects_at_once_and_keeps_its_card(lan, monkeypatch):
     retired = lan
     reconnects = []
+    monkeypatch.setattr(PrinterConnection, "STALE_SECONDS", 0.05)  # "long-lived" here
 
     async def scenario():
         conn = _conn()
         conn.on_reconnect_due = lambda: reconnects.append(conn.needs_reconnect())
         assert await conn.connect()
         old = conn.client
-        deliver(old, {"print": {"command": "push_status", "msg": 0, "gcode_state": "RUNNING"}})
+        deliver(old, FULL)
+        await asyncio.sleep(0.06)
         _drop(old)
-        return conn, old
+        during = await conn.read_state()
+        return conn, old, during
 
-    conn, old = asyncio.run(scenario())
+    conn, old, during = asyncio.run(scenario())
     assert retired == [old]  # with its queue of unacked requests
     assert conn.client is not old
-    assert conn.report.print["gcode_state"] == "RUNNING"  # no blank card meanwhile
+    # The card stays as it was (online, same data) while the new session connects.
+    assert during.online is True and during.gcode_state == "RUNNING"
     assert conn._full_seen is False  # the new session asks for a full report again
     assert reconnects == [True]  # due now, not after a backoff
+
+
+def test_a_session_that_keeps_dropping_backs_off_but_keeps_its_card(lan):
+    reconnects = []
+
+    async def scenario():
+        conn = _conn()
+        conn.on_reconnect_due = lambda: reconnects.append(1)
+        await conn.connect()
+        deliver(conn.client, FULL)
+        _drop(conn.client)  # seconds after connecting
+        return conn, await conn.read_state()
+
+    conn, state = asyncio.run(scenario())
+    assert reconnects == [] and conn.needs_reconnect() is False
+    assert state.online is True
+
+
+def test_the_card_goes_offline_when_the_reconnect_grace_runs_out(lan, monkeypatch):
+    monkeypatch.setattr(PrinterConnection, "MQTT_GRACE_SECONDS", 0.05)
+
+    async def scenario():
+        conn = _conn()
+        await conn.connect()
+        deliver(conn.client, FULL)
+        _drop(conn.client)
+        await asyncio.sleep(0.06)
+        return conn, await conn.read_state()
+
+    conn, state = asyncio.run(scenario())
+    assert state.online is False
+    assert conn.report.print == {}  # not shown as live when the printer is back
+
+
+def test_an_unreachable_printer_after_a_drop_forgets_the_kept_report(lan, monkeypatch):
+    async def scenario():
+        conn = _conn()
+        await conn.connect()
+        deliver(conn.client, FULL)
+        _drop(conn.client)
+        monkeypatch.setattr(discovery, "tcp_reachable", lambda ip, port=8883, timeout=3.0: False)
+        conn._retry_at = 0
+        await conn.connect()
+        return conn, await conn.read_state()
+
+    conn, state = asyncio.run(scenario())
+    assert state.online is False and conn.report.print == {}
+
+
+def test_silence_after_a_reconnect_reads_stale_not_check_the_serial(lan, monkeypatch):
+    monkeypatch.setattr(PrinterConnection, "STALE_SECONDS", 0.05)
+
+    async def scenario():
+        conn = _conn()
+        await conn.connect()
+        deliver(conn.client, FULL)
+        await conn.reset_session()
+        conn._retry_at = 0
+        await conn.connect()  # a new session that stays silent
+        await asyncio.sleep(0.06)
+        await conn.check_silence()
+        return conn._down_reason
+
+    from bamboozle import protocol
+    assert asyncio.run(scenario()) == protocol.STALE
 
 
 def test_a_drop_from_a_session_that_never_reported_backs_off(lan, monkeypatch):
@@ -72,7 +144,12 @@ def test_a_drop_from_a_session_that_never_reported_backs_off(lan, monkeypatch):
     assert reconnects == [] and conn.needs_reconnect() is False
 
 
-def test_a_drop_from_paho_s_thread_is_handled_on_the_loop(lan):
+def test_a_drop_from_paho_s_thread_is_handled_on_the_loop(lan, monkeypatch):
+    threads = []
+    real = PrinterConnection._on_drop
+    monkeypatch.setattr(PrinterConnection, "_on_drop",
+                        lambda self, client: threads.append(threading.get_ident()) or real(self, client))
+
     async def scenario():
         conn = _conn()
         assert await conn.connect()
@@ -80,10 +157,11 @@ def test_a_drop_from_paho_s_thread_is_handled_on_the_loop(lan):
         deliver(old, {"print": {"command": "push_status", "msg": 0, "gcode_state": "IDLE"}})
         await asyncio.to_thread(_drop, old)
         await asyncio.sleep(0.02)
-        return conn, old
+        return conn, old, threading.get_ident()
 
-    conn, old = asyncio.run(scenario())
+    conn, old, loop_thread = asyncio.run(scenario())
     assert conn.client is not old
+    assert threads == [loop_thread]
 
 
 def test_reports_after_disconnect_are_ignored(lan):

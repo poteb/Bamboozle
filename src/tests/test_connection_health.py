@@ -35,14 +35,15 @@ def test_never_connected_printer_is_offline(lan):
     assert _conn().is_offline() is True
 
 
-def test_brief_blip_on_long_lived_session_is_not_offline(lan):
+def test_a_session_still_handshaking_is_not_offline_within_the_grace(lan):
+    """paho retries a session's first connection by itself; that isn't down yet."""
     async def scenario():
         conn = _conn()
         await conn.connect()
         conn.client._paho.up = True
         await asyncio.sleep(0.3)          # session up for longer than the grace
         assert conn.is_offline() is False  # seen connected now
-        conn.client._paho.up = False  # socket briefly down (e.g. mid-handshake)
+        conn.client._paho.up = False  # socket not (yet) up, no drop reported
         return conn.is_offline()
 
     assert asyncio.run(scenario()) is False

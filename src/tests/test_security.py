@@ -19,9 +19,10 @@ SRC = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
     """The real app, without its lifespan (no printers, no SSDP listener)."""
-    main.app.state.manager = PrinterManager(AppConfig(), discovery_port=None)
+    monkeypatch.setattr(main.app.state, "manager",
+                        PrinterManager(AppConfig(), discovery_port=None), raising=False)
     return TestClient(main.app, base_url="http://127.0.0.1:8080")
 
 

@@ -106,3 +106,21 @@ def test_refresh_endpoint():
     result = asyncio.run(api.refresh_printer(Req(), "h2c"))
     assert result == {"success": True, "message": "Refresh requested", "confirmed": False}
     assert calls == [("h2c", "refresh")]
+
+
+def test_the_speed_endpoint_needs_a_level():
+    """A missing level used to mean "silent"; now it's refused."""
+    calls = []
+
+    class Mgr:
+        async def execute_command(self, printer_id, action, params=None):
+            calls.append(params)
+            return CommandResult(False, "Invalid speed level")
+
+    class Req:
+        class app:
+            class state:
+                manager = Mgr()
+
+    asyncio.run(api.set_speed(Req(), "h2c", {}))
+    assert calls == [{"level": None}]

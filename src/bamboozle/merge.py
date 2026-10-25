@@ -16,7 +16,8 @@ P1S AMS delta is just the changed unit, an A1 one can be just the
   cleared). In a delta, a list of dicts that all have an `id` (AMS units,
   trays, `vir_slot`, `device.extruder.info`) or all have a `node`
   (`lights_report`) merges item by item; other lists replace;
-- a delta tray carrying `tray_type` is complete and replaces the old tray (a
+- a delta tray (AMS, `vt_tray` or a `vir_slot`) carrying `tray_type` is
+  complete and replaces the old tray (a
   merge would keep an RFID spool's brand on the non-RFID one that replaced
   it). One holding only `id`, or `id` / `state` with state 10 (empty, H2C) or
   with its `tray_exist_bits` bit 0, is an empty slot and replaces it too. Any
@@ -108,6 +109,8 @@ class MergedReport:
             _apply_exist_bits(self.print["ams"], ams)
             if not full:
                 _replace_whole_trays(self.print["ams"], ams)
+        if not full:
+            _replace_whole_external_spools(self.print, body)
 
 
 def _echo(body: dict) -> Frame:
@@ -208,6 +211,22 @@ def _whole_tray(tray: dict, unit: int | None, bits: int | None) -> bool:
     if keys == {"id", "state"}:
         return tray["state"] == _TRAY_STATE_EMPTY or _bit(bits, unit, _unit_id(tray)) == 0
     return False
+
+
+def _replace_whole_external_spools(state: dict, frame: dict) -> None:
+    """External spools follow the AMS tray rule: a complete one (with
+    `tray_type`) replaces the old one, keeping no keys of the spool before."""
+    vt = frame.get("vt_tray")
+    if isinstance(vt, dict) and "tray_type" in vt:
+        state["vt_tray"] = copy.deepcopy(vt)
+    slots = frame.get("vir_slot")
+    current = state.get("vir_slot")
+    if not isinstance(slots, list) or not isinstance(current, list):
+        return
+    positions = {str(s.get("id")): pos for pos, s in enumerate(current) if isinstance(s, dict)}
+    for slot in slots:
+        if isinstance(slot, dict) and "tray_type" in slot and str(slot.get("id")) in positions:
+            current[positions[str(slot.get("id"))]] = copy.deepcopy(slot)
 
 
 def _replace_whole_trays(state_ams: dict, frame_ams: dict) -> None:

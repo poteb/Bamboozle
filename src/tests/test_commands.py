@@ -50,7 +50,8 @@ def test_sequence_ids_are_unique_strings():
     ("set_speed", {"level": 0}), ("set_speed", {"level": 5}), ("set_speed", {"level": "2; x"}),
     ("set_speed", {"level": None}), ("set_speed", {"level": True}), ("set_speed", {"level": 2.5}),
     ("set_speed", {}), ("set_light", {"mode": "flashing"}), ("set_light", {"mode": '"on"'}),
-    ("set_light", {}), ("gcode_line", {"param": "M112"}), ("nope", {}),
+    ("set_light", {}), ("set_light", {"mode": ["on"]}), ("set_light", {"mode": {"x": 1}}),
+    ("set_speed", {"level": "\u00b2"}), ("gcode_line", {"param": "M112"}), ("nope", {}),
 ])
 def test_bad_actions_and_params_are_refused_before_anything_is_sent(action, params):
     with pytest.raises(commands.InvalidCommand):

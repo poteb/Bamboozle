@@ -238,12 +238,11 @@ def publish(client: BambuClient, payload: dict) -> bool:
 def retire(client: Any) -> threading.Thread | None:
     """End the client's MQTT session without waiting on paho.
 
-    Callbacks are cleared first (each setter waits at most for a callback
-    already running on paho's thread), so a CONNACK still in flight can't
-    resubscribe or report into a connection that has been replaced. (A
-    callback already running isn't waited for; the connection drops reports
-    from a client it has replaced.) The DISCONNECT and the join of the network
-    thread run on a daemon thread. Returns that thread, or None when
+    Callbacks are cleared first, so a CONNACK or report arriving later isn't
+    delivered. A callback already running on paho's thread is not waited
+    for: the owner must ignore callbacks from a client it has retired
+    (PrinterConnection tags them with their client). The DISCONNECT and the
+    join of the network thread run on a daemon thread. Returns that thread, or None when
     there's no paho client.
     """
     paho_client = getattr(client, "paho", None)

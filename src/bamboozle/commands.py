@@ -121,7 +121,7 @@ def build(action: str, params: Any = None) -> Command:
             return _light("off")
         case "set_light":
             mode = params.get("mode")
-            if mode not in LIGHT_MODES:
+            if not isinstance(mode, str) or mode not in LIGHT_MODES:
                 raise InvalidCommand("Invalid light mode (on or off)")
             return _light(mode)
         case "refresh":

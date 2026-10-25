@@ -122,6 +122,27 @@ def test_the_heartbeat_sends_every_printer(monkeypatch):
     assert set(beat["printers"]) == {"a", "b"}
 
 
+def test_the_poll_loop_sends_the_heartbeat(monkeypatch):
+    monkeypatch.setattr(PrinterManager, "HEARTBEAT_SECONDS", 0.1)
+
+    async def no_housekeeping(self):
+        pass
+    monkeypatch.setattr(PrinterManager, "_poll_all", no_housekeeping)
+
+    async def scenario():
+        mgr, ws = _manager("a")
+        mgr._config.poll_interval = 0.02
+        await mgr._broadcast_changed(["a"])
+        ws.sent.clear()
+        task = asyncio.create_task(mgr._poll_loop())
+        await asyncio.sleep(0.35)
+        task.cancel()
+        return _updates(ws)
+
+    beats = asyncio.run(scenario())
+    assert 2 <= len(beats) <= 4  # every ~0.1 s though nothing changed, not every round
+
+
 class StuckWs(FakeWs):
     def __init__(self):
         super().__init__()

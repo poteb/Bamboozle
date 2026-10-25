@@ -332,3 +332,21 @@ def test_an_empty_get_version_reply_does_not_blank_the_firmware():
     r.apply({"info": {"command": "get_version", "module": [{"name": "ota", "sw_ver": "1"}]}})
     assert r.apply({"info": {"command": "get_version", "module": []}}).version
     assert r.info["module"] == [{"name": "ota", "sw_ver": "1"}]
+
+
+def test_a_complete_external_spool_replaces_the_old_one():
+    r = MergedReport()
+    r.apply(_status(msg=0, vt_tray={"id": "254", "tray_type": "PLA", "tray_id_name": "A00-B5"},
+                    vir_slot=[{"id": "254", "tray_type": "PLA", "tray_sub_brands": "PLA Basic"},
+                              {"id": "255", "tray_type": "PETG"}]))
+    r.apply(_status(vt_tray={"id": "254", "tray_type": "TPU"},
+                    vir_slot=[{"id": "254", "tray_type": "ABS"}]))
+    assert r.print["vt_tray"] == {"id": "254", "tray_type": "TPU"}
+    assert r.print["vir_slot"] == [{"id": "254", "tray_type": "ABS"}, {"id": "255", "tray_type": "PETG"}]
+
+
+def test_a_partial_external_spool_update_merges():
+    r = MergedReport()
+    r.apply(_status(msg=0, vt_tray={"id": "254", "tray_type": "PLA", "remain": 50}))
+    r.apply(_status(vt_tray={"id": "254", "remain": 40}))
+    assert r.print["vt_tray"] == {"id": "254", "tray_type": "PLA", "remain": 40}
