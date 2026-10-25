@@ -98,7 +98,7 @@ class PrinterConnection:
     def __init__(self, cfg: PrinterConfig):
         self.cfg = cfg
         self.cfg.camera_enabled = False  # Always start with cameras off
-        self.camera = CameraStream(cfg.ip, cfg.access_code, cfg.camera_port)
+        self.camera = CameraStream(cfg.ip, cfg.access_code, cfg.camera_port, cfg.model)
         # Camera toggles run start()/stop() in worker threads; this keeps
         # them in arrival order.
         self.camera_toggle_lock = asyncio.Lock()
@@ -871,6 +871,7 @@ class PrinterManager:
         logger.info("PrinterManager stopped")
 
     async def add_printer(self, cfg: PrinterConfig) -> None:
+        cfg.model = cfg.model or self._announced_model(cfg.serial)
         conn = PrinterConnection(cfg)
         self._connections[cfg.id] = conn
         self._config.printers.append(cfg)
@@ -909,6 +910,7 @@ class PrinterManager:
                 "Failed to back up printer config for %s: %s", conn.cfg.name, e
             )
         await conn.disconnect()
+        cfg.model = cfg.model or self._announced_model(cfg.serial)
         new_conn = PrinterConnection(cfg)
         self._connections[printer_id] = new_conn
         self._config.printers = [
@@ -944,8 +946,38 @@ class PrinterManager:
     def _on_announcement(self, ann: discovery.Announcement) -> None:
         serial = ann.serial.upper()
         self._remember(serial, ann)
-        if any(c.cfg.serial.upper() == serial for c in self._connections.values()):
+        conn = next(
+            (c for c in self._connections.values() if c.cfg.serial.upper() == serial),
+            None,
+        )
+        if conn is not None:
+            self._learn_model(conn, ann)
             self._spawn(self.handle_announcement(ann))
+
+    def _learn_model(self, conn: PrinterConnection, ann: discovery.Announcement) -> None:
+        """Record the model a configured printer announces (backfills old configs).
+
+        Trusted only from the printer's configured IP; a move to a new IP goes
+        through handle_announcement's cert check. Only the field changes and
+        the config is saved: no reconnect and no history backup, since the
+        model just picks the camera's ffmpeg profile for its next session.
+        """
+        if not ann.model or ann.ip != conn.cfg.ip or ann.model == conn.cfg.model:
+            return
+        logger.info(
+            "%s announced model %s (%s)", conn.cfg.name, discovery.model_info(ann.model)[0], ann.model
+        )
+        conn.cfg.model = ann.model
+        conn.camera.model = ann.model
+        for p in self._config.printers:
+            if p.id == conn.cfg.id:
+                p.model = ann.model
+        save_config(self._config)
+
+    def _announced_model(self, serial: str) -> str:
+        """The model a printer with this serial last announced, or ""."""
+        entry = self._discovered.get(serial.upper())
+        return entry[0].model if entry else ""
 
     async def handle_announcement(self, ann: discovery.Announcement) -> None:
         """Follow a configured printer to the IP it just announced.
@@ -989,7 +1021,9 @@ class PrinterManager:
             if current is not conn or not conn.is_offline():
                 return
             old_ip = conn.cfg.ip
-            new_cfg = conn.cfg.model_copy(update={"ip": ann.ip})
+            new_cfg = conn.cfg.model_copy(
+                update={"ip": ann.ip, "model": ann.model or conn.cfg.model}
+            )
             await self.update_printer(printer_id, new_cfg)
             logger.info("%s moved from %s to %s", new_cfg.name, old_ip, ann.ip)
             await self._broadcast({
