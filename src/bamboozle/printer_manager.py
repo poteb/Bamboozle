@@ -71,7 +71,7 @@ class PrinterConnection:
                     self.cfg.name, self.cfg.ip, rc,
                 )
             self._auth_rejected = True
-        elif not getattr(rc, "is_failure", True):
+        elif not protocol.connack_failed(rc):
             if self._auth_rejected:
                 logger.info("%s: MQTT login accepted again", self.cfg.name)
             self._auth_rejected = False
@@ -153,8 +153,8 @@ class PrinterConnection:
         """
         if self._connecting:
             return False
-        if not self._connected:
-            return True
+        if not self._connected or self._auth_rejected:
+            return True  # a refused code won't fix itself; don't wait out the grace
         try:
             if self.printer.mqtt_client.is_connected():
                 self._last_seen_up = time.monotonic()
@@ -263,15 +263,9 @@ class PrinterConnection:
 
         filaments = self._read_filaments()
 
-        try:
-            dump = p.mqtt_dump() or {}
-            report = dump.get("print") if isinstance(dump, dict) else None
-            if not isinstance(report, dict):
-                report = {}
-            developer_mode = protocol.developer_mode(report)
-            commands_blocked = protocol.commands_blocked(report)
-        except Exception:
-            developer_mode, commands_blocked = None, False
+        report = self._print_payload() or {}
+        developer_mode = protocol.developer_mode(report)
+        commands_blocked = protocol.commands_blocked(report)
 
         online = gcode_str != "UNKNOWN" or nozzle_temp is not None
 
@@ -320,6 +314,16 @@ class PrinterConnection:
             sort=self.cfg.sort,
             timestamp=time.time(),
         )
+
+    def _print_payload(self) -> dict | None:
+        """The raw `print` object of the latest reports, or None before any."""
+        try:
+            dump = self.printer.mqtt_dump() or {}
+        except Exception as e:
+            logger.debug("mqtt_dump() failed for %s: %s", self.cfg.name, e)
+            return None
+        payload = dump.get("print") if isinstance(dump, dict) else None
+        return payload if isinstance(payload, dict) else None
 
     # --- Filament helpers -------------------------------------------------
 
@@ -410,14 +414,8 @@ class PrinterConnection:
         only return a non-None list when we actually find something useful;
         otherwise we let the caller fall back to the library helpers.
         """
-        try:
-            dump = self.printer.mqtt_dump() or {}
-        except Exception as e:
-            logger.debug("mqtt_dump() failed for %s: %s", self.cfg.name, e)
-            return None
-
-        print_payload = dump.get("print") if isinstance(dump, dict) else None
-        if not isinstance(print_payload, dict):
+        print_payload = self._print_payload()
+        if print_payload is None:
             return None
 
         out: list[Filament] = []

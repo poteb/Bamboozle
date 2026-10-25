@@ -770,11 +770,9 @@ class BamboozleApp {
             };
         }
         if (s.online && s.commands_blocked) {
-            return {
-                text: 'Printer is refusing commands: enable Developer Mode',
-                title: 'Printer is refusing control commands: enable LAN Only + '
-                    + 'Developer Mode on the printer, then restart it',
-            };
+            const text = 'Printer is refusing control commands: enable LAN Only + '
+                + 'Developer Mode on the printer, then restart it';
+            return { text, title: text };
         }
         return null;
     }

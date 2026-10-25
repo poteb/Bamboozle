@@ -194,7 +194,7 @@ async def test_connection(body: PrinterAddRequest) -> dict:
         rc = connack[0]
         if protocol.is_auth_refusal(rc):
             return {"success": False, "message": protocol.AUTH_REJECTED_MESSAGE}
-        if getattr(rc, "is_failure", False):
+        if protocol.connack_failed(rc):
             return {"success": False, "message": f"Printer refused the connection: {rc}"}
         if not await asyncio.to_thread(got_report.wait, TEST_REPORT_TIMEOUT):
             return {"success": False,

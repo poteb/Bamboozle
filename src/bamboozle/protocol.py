@@ -32,7 +32,7 @@ AUTH_REJECTED_MESSAGE = (
 )
 
 
-def _as_int(value: Any) -> int | None:
+def _hex_or_int(value: Any) -> int | None:
     """Ints pass through; strings are read as hex. Anything else is None."""
     if isinstance(value, bool):
         return None
@@ -48,7 +48,7 @@ def _as_int(value: Any) -> int | None:
 
 def developer_mode(print_payload: dict) -> bool | None:
     """True / False from `fun`; None when the printer doesn't report it."""
-    fun = _as_int(print_payload.get("fun"))
+    fun = _hex_or_int(print_payload.get("fun"))
     if fun is None:
         return None
     return not fun & DEV_MODE_OFF_BIT
@@ -63,8 +63,8 @@ def hms_codes(print_payload: dict) -> set[str]:
     for entry in entries:
         if not isinstance(entry, dict):
             continue
-        attr = _as_int(entry.get("attr"))
-        code = _as_int(entry.get("code"))
+        attr = _hex_or_int(entry.get("attr"))
+        code = _hex_or_int(entry.get("code"))
         if attr is None or code is None:
             continue
         codes.add(f"{attr:08X}{code:08X}")
@@ -77,6 +77,11 @@ def commands_blocked(print_payload: dict) -> bool:
         developer_mode(print_payload) is False
         or COMMAND_VERIFY_FAILED_HMS in hms_codes(print_payload)
     )
+
+
+def connack_failed(reason_code: Any) -> bool:
+    """True when a CONNACK (paho ReasonCode or int) refused the connection."""
+    return getattr(reason_code, "is_failure", reason_code != 0)
 
 
 def is_auth_refusal(reason_code: Any) -> bool:

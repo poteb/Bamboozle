@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -61,8 +62,8 @@ class PrinterState(BaseModel):
     developer_mode: bool | None = None
     # The printer is known to drop control commands (see protocol.py).
     commands_blocked: bool = False
-    # Why the connection is down, when known: "" or protocol.AUTH_REJECTED.
-    last_error: str = ""
+    # Why the connection is down, when known (protocol.AUTH_REJECTED).
+    last_error: Literal["", "auth_rejected"] = ""
     sort: int = 0
     timestamp: float = Field(default_factory=time.time)
 

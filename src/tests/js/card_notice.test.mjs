@@ -33,9 +33,10 @@ test('a healthy printer has no notice', () => {
 
 test('a printer refusing commands says how to fix it', () => {
     const n = app.cardNotice(printer({ commands_blocked: true }));
+    // The whole fix is visible, not only in a hover tooltip.
     assert.match(n.text, /refus/i);
-    assert.match(n.text, /Developer Mode/);
-    assert.match(n.title, /LAN Only/);
+    assert.match(n.text, /LAN Only \+ Developer Mode/);
+    assert.match(n.text, /restart/);
 });
 
 test('a refused access code says so, and where to fix it', () => {

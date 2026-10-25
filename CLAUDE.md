@@ -58,6 +58,10 @@ Both protocols run in a dedicated thread with exponential backoff reconnect (3s 
 
 Before `mqtt_start`, `PrinterConnection.connect` (and `POST /api/printers/test`) TCP-probes port 8883 and reports "printer unreachable at <ip>" on failure — `mqtt_start` itself is paho `connect_async` and never fails, which used to surface only as the library's "Printer Values Not Available Yet". The poll loop schedules reconnects as background tasks so an unreachable printer can't stall updates.
 
+A refused MQTT login (CONNACK 134/135) is caught through the library's `mqtt_client.on_connect_handler` and reported as "access code wrong or changed": `PrinterState.last_error = "auth_rejected"` (shown on the card), a log line, and the `POST /api/printers/test` message. That endpoint waits for the CONNACK and then a first report, so it can also say "timed out" or "check the serial number".
+
+**`protocol.py`** holds Bambu protocol facts as pure functions over the report's `print` dict (plus CONNACK helpers), so they're unit-testable without MQTT. `PrinterState.developer_mode` comes from the `fun` bitfield (bit `0x20000000` set = off; `None` on A1/P1, which don't send it). `commands_blocked` is true when Developer Mode is off or HMS `0500050000010007` ("command verification failed") is raised. The printer then silently drops pause/stop/light/speed, so the card shows a notice, and `execute_command` still sends the command but reports it as failed with the reason.
+
 **IP auto-detect** (`discovery.py`): `SsdpListener` passively listens on UDP 2021 (SO_REUSEADDR, shared with Bambu Studio; bind failure just disables the feature) for Bambu SSDP announcements (`Location` = IP, `USN` = serial). `PrinterManager.handle_announcement` matches on serial only (printers behind a repeater share one MAC), acts only when the printer isn't healthy at its saved IP, requires the TLS cert CN at the new IP to equal the serial (true for A1, P1S, H2C, P2S), then goes through `update_printer` and broadcasts `{"type": "notice"}` (shown as a toast).
 
 **Discover printers**: every announcement (configured or not) is also cached in memory on `PrinterManager` (keyed by upper-cased serial, latest wins, dropped after 5 min, capped at 64). `GET /api/discovery` returns `{"listening", "printers"}` with configured serials filtered out at request time; `discovery.model_info` maps `DevModel` codes to a friendly name + camera port (unknown → raw code, no port). The Settings Add form polls it every 5 s and a pick fills IP / serial / camera port (and Name if blank). The route sits outside `/printers/...` because `GET /printers/{printer_id}` would swallow it.
@@ -66,7 +70,7 @@ Before `mqtt_start`, `PrinterConnection.connect` (and `POST /api/printers/test`)
 
 **Routers** (`bamboozle/routers/`):
 - `pages.py` — Jinja2-rendered HTML (`dashboard.html`, `settings.html`, `camera.html`, base layout).
-- `api.py` (mounted at `/api`) — REST CRUD for printers plus action endpoints; `POST /api/printers/test` does a throwaway MQTT connection without persisting. `GET /api/discovery` lists unconfigured printers heard on the LAN.
+- `api.py` (mounted at `/api`) — REST CRUD for printers plus action endpoints; `POST /api/printers/test` does a throwaway MQTT connection without persisting and reports why it failed (unreachable, access code refused, timeout, no data). `GET /api/discovery` lists unconfigured printers heard on the LAN.
 - `ws.py` — WebSocket endpoint the dashboard subscribes to for push updates.
 - `stream.py` — MJPEG camera passthrough.
 

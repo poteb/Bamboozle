@@ -85,6 +85,20 @@ def test_late_refusal_on_reconnect_is_reported(lan, monkeypatch, caplog):
     assert "Printer Values Not Available Yet" not in caplog.text
 
 
+def test_late_refusal_counts_as_offline_without_waiting_for_the_grace(lan, monkeypatch):
+    """So the poll loop stops paho retrying the bad code at once."""
+    monkeypatch.setattr(bl.Printer, "mqtt_start", lambda self: connack(self, SUCCESS))
+    monkeypatch.setattr(PrinterConnection, "MQTT_GRACE_SECONDS", 60)
+    conn = _conn()
+
+    async def scenario():
+        await conn.connect()
+        connack(conn.printer, BAD_PASSWORD)
+        return conn.is_offline()
+
+    assert asyncio.run(scenario()) is True
+
+
 def test_accepted_login_clears_the_error(lan, monkeypatch):
     monkeypatch.setattr(bl.Printer, "mqtt_start", lambda self: connack(self, BAD_PASSWORD))
     conn = _conn()
