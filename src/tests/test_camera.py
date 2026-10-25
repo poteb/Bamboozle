@@ -1,4 +1,5 @@
 """Camera reconnect policy, frozen-frame watchdog and port-6000 framing."""
+import asyncio
 import datetime
 import io
 import socket
@@ -290,15 +291,22 @@ def silent_printer(tmp_path):
     server = socket.create_server(("127.0.0.1", 0))
     accepted = []
 
+    authed = threading.Event()
+
     def serve(handshake):
         conn, _ = server.accept()
         if handshake:
             conn = ctx.wrap_socket(conn, server_side=True)
         accepted.append(conn)
+        if handshake:
+            received = b""
+            while len(received) < 80:
+                received += conn.recv(80 - len(received))
+            authed.set()  # the client is now waiting for its first frame
 
     def run(handshake=True):
         threading.Thread(target=serve, args=(handshake,), daemon=True).start()
-        return server.getsockname()[1], accepted
+        return server.getsockname()[1], accepted, authed
 
     yield run
     for conn in accepted:
@@ -308,11 +316,13 @@ def silent_printer(tmp_path):
 
 @pytest.mark.parametrize("handshake", [True, False], ids=["in-recv", "in-handshake"])
 def test_stop_interrupts_a_stalled_raw_socket_promptly(silent_printer, handshake):
-    port, accepted = silent_printer(handshake)
+    port, accepted, authed = silent_printer(handshake)
     cam = CameraStream("127.0.0.1", "x", port)
     cam.start()
     assert wait_until(lambda: accepted and cam._interrupt is not None)
-    time.sleep(0.1)  # let the capture thread block
+    if handshake:
+        assert authed.wait(2)
+    time.sleep(0.1)  # let the capture thread block in recv / the handshake
     thread = cam._thread
     started = time.monotonic()
     cam.stop()
@@ -395,3 +405,43 @@ def test_payload_that_is_not_a_jpeg_raises():
     recv = chunked(packet(b"\x00" * 40) + packet(JPEG_B), 4096)
     with pytest.raises(ConnectionError, match="sync"):
         next(raw_frames(recv, bytearray()))
+
+
+# -- dashboard toggle ----------------------------------------------------------
+
+
+def test_camera_toggles_apply_in_the_order_they_arrive(monkeypatch):
+    """Off right after on must leave the camera off, even though start/stop run in worker threads."""
+    from types import SimpleNamespace
+
+    from bamboozle.models import AppConfig, PrinterConfig
+    from bamboozle.printer_manager import PrinterConnection
+    from bamboozle.routers import api
+
+    calls = []
+
+    class SlowCamera:
+        def start(self):
+            time.sleep(0.2)
+            calls.append("start")
+
+        def stop(self):
+            calls.append("stop")
+
+    conn = PrinterConnection(PrinterConfig(
+        name="H2C", ip="192.168.0.100", access_code="x", serial="0948BB540200427"))
+    conn.camera = SlowCamera()
+    manager = SimpleNamespace(
+        get_connection=lambda pid: conn, config=AppConfig(printers=[conn.cfg]))
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(manager=manager)))
+    monkeypatch.setattr(api, "save_config", lambda cfg: None)
+
+    async def scenario():
+        await asyncio.gather(
+            api.toggle_camera(request, conn.cfg.id, {"enabled": True}),
+            api.toggle_camera(request, conn.cfg.id, {"enabled": False}),
+        )
+
+    asyncio.run(scenario())
+    assert calls == ["start", "stop"]
+    assert conn.cfg.camera_enabled is False

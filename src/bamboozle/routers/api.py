@@ -156,18 +156,19 @@ async def toggle_camera(request: Request, printer_id: str, body: dict) -> dict:
     if not conn:
         raise HTTPException(404, "Printer not found")
 
-    enabled = body.get("enabled", not conn.cfg.camera_enabled)
-    conn.cfg.camera_enabled = enabled
+    async with conn.camera_toggle_lock:
+        enabled = body.get("enabled", not conn.cfg.camera_enabled)
+        conn.cfg.camera_enabled = enabled
 
-    # Update config
-    for p in manager.config.printers:
-        if p.id == printer_id:
-            p.camera_enabled = enabled
-            break
-    save_config(manager.config)
+        # Update config
+        for p in manager.config.printers:
+            if p.id == printer_id:
+                p.camera_enabled = enabled
+                break
+        save_config(manager.config)
 
-    # stop() joins the capture thread, so keep both off the event loop.
-    await asyncio.to_thread(conn.camera.start if enabled else conn.camera.stop)
+        # stop() joins the capture thread, so keep both off the event loop.
+        await asyncio.to_thread(conn.camera.start if enabled else conn.camera.stop)
 
     return {"success": True, "camera_enabled": enabled}
 

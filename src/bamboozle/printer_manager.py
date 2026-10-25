@@ -54,6 +54,9 @@ class PrinterConnection:
         self.cfg = cfg
         self.cfg.camera_enabled = False  # Always start with cameras off
         self.camera = CameraStream(cfg.ip, cfg.access_code, cfg.camera_port)
+        # Camera toggles run start()/stop() in worker threads; this keeps
+        # them in arrival order.
+        self.camera_toggle_lock = asyncio.Lock()
         self.state = PrinterState(printer_id=cfg.id, name=cfg.name, sort=cfg.sort)
         self.thumbnail: bytes | None = None
         self._thumb_fetched_for: str = ""  # gcode_file we fetched thumbnail for

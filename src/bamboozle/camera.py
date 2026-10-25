@@ -436,8 +436,8 @@ class CameraStream:
                     logger.error("ffmpeg error for %s: %s", self._ip, stderr)
         finally:
             self._clear_interrupt(interrupt)
-            if watch is not None:
-                self._frozen_on = watch.frozen_on
+            if watch is not None and threading.current_thread() is self._thread:
+                self._frozen_on = watch.frozen_on  # not from a superseded run
             if proc.poll() is None:
                 proc.terminate()
                 try:
