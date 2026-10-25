@@ -333,26 +333,12 @@ def test_status_fields_tolerates_an_empty_report():
 
 # --- Wiring into the poll ---------------------------------------------------
 
-class FakeMqttClient:
-    def is_connected(self):
-        return True
-
-
-class DumpOnlyPrinter:
-    """Only `mqtt_dump()`; every library getter raises."""
-
-    def __init__(self, dump):
-        self._dump = dump
-        self.mqtt_client = FakeMqttClient()
-
-    def mqtt_dump(self):
-        return self._dump
-
-
 def _read(dump, model=""):
+    """The state read from a merged report holding `dump`."""
     conn = PrinterConnection(PrinterConfig(
         name="P", ip="192.168.0.1", access_code="x", serial="S", model=model))
-    conn.printer = DumpOnlyPrinter(dump)
+    conn.report.print = dump.get("print", {})
+    conn.report.info = dump.get("info")
     conn._connected = True
     return asyncio.run(conn.read_state())
 
@@ -399,25 +385,21 @@ def test_state_hides_the_a1_chamber_and_idle_stage():
 # --- Firmware version request -------------------------------------------------
 
 def _recording_conn():
-    import bambulabs_api as bl
-    from test_light_refresh import RecordingPaho
+    from fakes import RecordingPaho
 
-    printer = bl.Printer("192.168.0.102", "x", "S")
-    printer.mqtt_client._client = RecordingPaho()
-    printer.mqtt_client._data = {"print": {"gcode_state": "IDLE", "nozzle_temper": 25.0}}
     conn = PrinterConnection(PrinterConfig(name="P", ip="192.168.0.102", access_code="x", serial="S"))
-    conn.printer = printer
+    conn.client._paho = RecordingPaho()
+    conn.report.print = {"gcode_state": "IDLE", "nozzle_temper": 25.0}
     conn._connected = True
     return conn
 
 
 def _version_requests(conn):
-    return [p for _, p, _ in conn.printer.mqtt_client._client.published if "info" in p]
+    return [p for _, p, _ in conn.client.paho.published if "info" in p]
 
 
 def test_firmware_is_asked_for_until_the_printer_answers(monkeypatch):
-    """The library's connect-time get_version shares a message with pushall,
-    which the printers ignore, so the poll asks on its own."""
+    """Asked for on its own (A1 / P1S ignore it combined with pushall)."""
     conn = _recording_conn()
     asyncio.run(conn.read_state())
     asyncio.run(conn.read_state())
@@ -429,7 +411,7 @@ def test_firmware_is_asked_for_until_the_printer_answers(monkeypatch):
     asyncio.run(conn.read_state())
     assert len(_version_requests(conn)) == 2
 
-    conn.printer.mqtt_client._data["info"] = {"module": [{"name": "ota", "sw_ver": "01.08.01.00"}]}
+    conn.report.info = {"module": [{"name": "ota", "sw_ver": "01.08.01.00"}]}
     state = asyncio.run(conn.read_state())
     assert state.firmware == "01.08.01.00"
     assert len(_version_requests(conn)) == 2
@@ -437,7 +419,7 @@ def test_firmware_is_asked_for_until_the_printer_answers(monkeypatch):
 
 def test_no_version_request_while_offline():
     conn = _recording_conn()
-    conn.printer.mqtt_client._data = {}
+    conn.report.print = {}
     state = asyncio.run(conn.read_state())
     assert not state.online
     assert _version_requests(conn) == []
@@ -471,9 +453,38 @@ def test_unanswered_version_requests_back_off(monkeypatch):
 
 def test_a_new_session_asks_for_the_version_again(monkeypatch):
     from bamboozle import mqtt
-    monkeypatch.setattr(mqtt, "retire", lambda printer: None)
+    monkeypatch.setattr(mqtt, "retire", lambda client: None)
     conn = _recording_conn()
     asyncio.run(conn.read_state())
     assert len(_version_requests(conn)) == 1
     asyncio.run(conn.reset_session())
     assert conn._version_asked_at == float("-inf")
+
+
+# --- Hostile numbers (threat model: reports never take a card down) ---------------
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", float("nan"), float("inf"), 10 ** 400, "1e400"])
+def test_non_finite_numbers_read_as_missing(value):
+    assert report._num(value) is None
+
+
+def test_a_report_with_hostile_numbers_still_decodes():
+    from bamboozle import snapshot
+    fields, job = snapshot.decode({"gcode_state": "RUNNING", "mc_percent": "nan",
+                                   "layer_num": 10 ** 400, "mc_remaining_time": float("inf"),
+                                   "nozzle_temper": "1e400"}, None, "")
+    assert fields["online"] is True
+    assert (fields["progress"], fields["current_layer"], fields["remaining_minutes"]) == (0, 0, 0)
+    assert fields["nozzle_temp"] is None
+
+
+def test_a_failing_decoder_costs_only_its_own_fields(monkeypatch):
+    from bamboozle import snapshot
+
+    def boom(*_):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(report, "job_fields", boom)
+    fields, job = snapshot.decode({"gcode_state": "RUNNING", "nozzle_temper": 200}, None, "")
+    assert fields["gcode_state"] == "UNKNOWN"
+    assert fields["nozzle_temp"] == 200.0 and fields["online"] is True

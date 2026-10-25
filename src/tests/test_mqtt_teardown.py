@@ -4,7 +4,6 @@ import asyncio
 import threading
 import time
 
-import bambulabs_api as bl
 import pytest
 
 from bamboozle import discovery, mqtt
@@ -12,6 +11,9 @@ from bamboozle.models import AppConfig, PrinterAddRequest, PrinterConfig
 from bamboozle.printer_manager import PrinterConnection, PrinterManager
 from bamboozle.routers import api
 from bamboozle.routers.api import test_connection as api_test_connection
+from fakes import connack
+from paho.mqtt.packettypes import PacketTypes
+from paho.mqtt.reasoncodes import ReasonCode
 
 SERIAL = "01P00C511100150"
 
@@ -23,6 +25,7 @@ class FakePaho:
     def __init__(self, release: threading.Event | None = None):
         self.calls = []
         self.on_connect = object()
+        self.on_subscribe = object()
         self.on_message = object()
         self.on_disconnect = object()
         self.callbacks_at_disconnect = None
@@ -31,7 +34,8 @@ class FakePaho:
 
     def disconnect(self):
         self.calls.append("disconnect")
-        self.callbacks_at_disconnect = (self.on_connect, self.on_message, self.on_disconnect)
+        self.callbacks_at_disconnect = (
+            self.on_connect, self.on_subscribe, self.on_message, self.on_disconnect)
 
     def is_connected(self):
         return False
@@ -43,27 +47,27 @@ class FakePaho:
         self.stopped.set()
 
 
-def _printer_with(paho):
-    printer = bl.Printer("192.168.0.103", "x", SERIAL)
-    printer.mqtt_client._client = paho
-    return printer
+def _client_with(paho):
+    client = mqtt.BambuClient("192.168.0.103", "x", SERIAL)
+    client._paho = paho
+    return client
 
 
 def test_retire_clears_callbacks_then_disconnects_before_loop_stop():
     paho = FakePaho()
-    thread = mqtt.retire(_printer_with(paho))
+    thread = mqtt.retire(_client_with(paho))
     # Cleared before retire returns, so a late CONNACK can't resubscribe.
-    assert (paho.on_connect, paho.on_message, paho.on_disconnect) == (None, None, None)
+    assert (paho.on_connect, paho.on_subscribe, paho.on_message, paho.on_disconnect) == (None,) * 4
     thread.join(2)
     assert paho.calls[:2] == ["disconnect", "loop_stop"]
-    assert paho.callbacks_at_disconnect == (None, None, None)
+    assert paho.callbacks_at_disconnect == (None,) * 4
 
 
 def test_retire_does_not_wait_for_a_blocked_network_thread():
     release = threading.Event()
     paho = FakePaho(release)
     started = time.monotonic()
-    thread = mqtt.retire(_printer_with(paho))
+    thread = mqtt.retire(_client_with(paho))
     assert time.monotonic() - started < 0.5
     assert thread.is_alive()  # still joining in the background
     release.set()
@@ -74,7 +78,7 @@ def test_retire_does_not_wait_for_a_blocked_network_thread():
 def test_retire_disconnects_again_after_the_thread_stops():
     """A handshake that finished during the first disconnect gets closed too."""
     paho = FakePaho()
-    mqtt.retire(_printer_with(paho)).join(2)
+    mqtt.retire(_client_with(paho)).join(2)
     assert paho.calls == ["disconnect", "loop_stop", "disconnect"]
 
 
@@ -107,7 +111,7 @@ class LateHandshakePaho(FakePaho):
 
 def test_retire_closes_a_handshake_that_completes_after_the_first_disconnect():
     paho = LateHandshakePaho()
-    thread = mqtt.retire(_printer_with(paho))
+    thread = mqtt.retire(_client_with(paho))
     thread.join(3)
     assert not thread.is_alive()
     assert paho.closed.is_set()
@@ -122,20 +126,19 @@ def test_retire_keeps_going_when_disconnect_fails():
         raise OSError("socket gone")
 
     paho.disconnect = boom
-    mqtt.retire(_printer_with(paho)).join(2)
+    mqtt.retire(_client_with(paho)).join(2)
     assert "loop_stop" in paho.calls
 
 
-def test_retire_tolerates_a_printer_without_a_paho_client():
+def test_retire_tolerates_an_object_without_a_paho_client():
     class Bare:
-        mqtt_client = object()
+        pass
 
     assert mqtt.retire(Bare()) is None
 
 
 def test_retire_on_a_real_never_started_client_is_harmless():
-    printer = bl.Printer("192.168.0.103", "x", SERIAL)
-    mqtt.retire(printer).join(2)
+    mqtt.retire(mqtt.BambuClient("192.168.0.103", "x", SERIAL)).join(2)
 
 
 # --- PrinterConnection / PrinterManager -----------------------------------------
@@ -144,7 +147,7 @@ def test_retire_on_a_real_never_started_client_is_harmless():
 @pytest.fixture
 def lan(monkeypatch):
     monkeypatch.setattr(discovery, "tcp_reachable", lambda ip, port=8883, timeout=3.0: True)
-    monkeypatch.setattr(bl.Printer, "mqtt_start", lambda self: None)
+    monkeypatch.setattr(mqtt.BambuClient, "start", lambda self: None)
     monkeypatch.setattr(PrinterConnection, "MQTT_SETTLE_SECONDS", 0)
 
 
@@ -153,16 +156,16 @@ def blocked_teardown(monkeypatch):
     """Every retired client blocks in loop_stop until the test ends."""
     release = threading.Event()
     clients = []
-    orig_new_printer = PrinterConnection._new_printer
+    orig_new_client = PrinterConnection._new_client
 
-    def new_printer(self):
-        printer = orig_new_printer(self)
+    def new_client(self):
+        client = orig_new_client(self)
         paho = FakePaho(release)
         clients.append(paho)
-        printer.mqtt_client._client = paho
-        return printer
+        client._paho = paho
+        return client
 
-    monkeypatch.setattr(PrinterConnection, "_new_printer", new_printer)
+    monkeypatch.setattr(PrinterConnection, "_new_client", new_client)
     yield clients
     release.set()
 
@@ -185,7 +188,7 @@ def test_disconnect_returns_at_once_and_disconnects(blocked_teardown):
 
 def test_reset_session_retires_the_client_and_starts_a_fresh_one(lan, blocked_teardown):
     conn = PrinterConnection(_cfg())
-    old_printer = conn.printer
+    old_client = conn.client
 
     async def scenario():
         await conn.connect()
@@ -193,18 +196,17 @@ def test_reset_session_retires_the_client_and_starts_a_fresh_one(lan, blocked_te
 
     asyncio.run(scenario())
     assert blocked_teardown[0].calls[0] == "disconnect"
-    assert conn.printer is not old_printer
-    # The fresh client reports logins and messages to the connection too.
-    mc = conn.printer.mqtt_client
-    assert mc.on_connect_handler == conn._on_mqtt_connack
-    assert mc.on_message_handler == conn._on_mqtt_message
+    assert conn.client is not old_client
+    # The fresh client reports logins to the connection too.
+    connack(conn.client, ReasonCode(PacketTypes.CONNACK, "Not authorized"))
+    assert conn._auth_rejected is True
 
 
 def test_connection_widens_the_inflight_window():
     """The Bambu broker's PUBACKs race paho's QoS 1 tracking; the default
     window of 20 wedges a session after a few dozen commands."""
     conn = PrinterConnection(_cfg())
-    assert conn.printer.mqtt_client._client._max_inflight_messages == mqtt.INFLIGHT_WINDOW
+    assert conn.client.paho._max_inflight_messages == mqtt.INFLIGHT_WINDOW
 
 
 def test_edit_and_remove_never_wait_for_teardown(lan, blocked_teardown, monkeypatch):
@@ -231,7 +233,7 @@ def test_shutdown_waits_briefly_for_the_disconnects_to_go_out(lan, monkeypatch):
     async def scenario():
         mgr = PrinterManager(AppConfig(printers=[_cfg()]), discovery_port=None)
         await mgr.start()
-        mgr.get_connection("p1s").printer.mqtt_client._client = paho
+        mgr.get_connection("p1s").client._paho = paho
         started = time.monotonic()
         await mgr.stop()
         return time.monotonic() - started
@@ -251,15 +253,15 @@ def _body():
 
 @pytest.mark.parametrize("start", [
     lambda self: None,  # no CONNACK: times out
-    lambda self: self.mqtt_client.on_connect_handler(self.mqtt_client, None, None, None, 0, None),
+    lambda self: connack(self, 0),
 ])
 def test_api_test_retires_its_throwaway_session(lan, monkeypatch, start):
     monkeypatch.setattr(api, "TEST_CONNACK_TIMEOUT", 0.1)
     monkeypatch.setattr(api, "TEST_REPORT_TIMEOUT", 0.1)
-    monkeypatch.setattr(bl.Printer, "mqtt_start", start)
+    monkeypatch.setattr(mqtt.BambuClient, "start", start)
     retired = []
     monkeypatch.setattr(mqtt, "retire", lambda printer: retired.append(printer))
 
     asyncio.run(api_test_connection(_body()))
     assert len(retired) == 1
-    assert isinstance(retired[0], bl.Printer)
+    assert isinstance(retired[0], mqtt.BambuClient)

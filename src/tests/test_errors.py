@@ -201,33 +201,12 @@ def test_no_errors():
 
 # --- On the printer state ------------------------------------------------------
 
-class FakeMqttClient:
-    def is_connected(self):
-        return True
-
-
-class DumpOnlyPrinter:
-    """Only `mqtt_dump()`; every library getter raises, so _read_sync defaults."""
-
-    def __init__(self, print_payload):
-        self._payload = print_payload
-        self._client = FakeMqttClient()
-
-    def mqtt_dump(self):
-        return {"print": self._payload}
-
-    def __getattr__(self, name):
-        def fail(*a, **k):
-            raise RuntimeError("not available")
-        return fail
-
-
 def test_printer_state_carries_the_errors():
     cfg = PrinterConfig(name="H2C", ip="10.0.0.3", access_code="x", serial="S", model="O1C2")
     conn = PrinterConnection(cfg)
-    conn.printer = DumpOnlyPrinter({"gcode_state": "PAUSE", "nozzle_temper": 25,
-                                    "hms": [AMS2_RUNOUT]})
-    state, _ = conn._read_sync()
+    conn.report.print = {"gcode_state": "PAUSE", "nozzle_temper": 25, "hms": [AMS2_RUNOUT]}
+    conn._connected = True
+    state = asyncio.run(conn.read_state())
     assert [(e.code, e.active) for e in state.errors] == [("0701_2000_0002_0001", True)]
     dumped = state.model_dump(mode="json")["errors"][0]
     assert dumped["module"] == "AMS 2"

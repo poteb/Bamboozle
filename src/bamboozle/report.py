@@ -10,9 +10,10 @@ are protocol facts); the stage wording is our own.
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 
-from .models import AmsUnit, Fans, Nozzle
+from .models import AmsUnit, Fans, Filament, Nozzle
 from .protocol import hex_or_int
 
 # DevModel codes. X1 family: the flat `chamber_temper` is a real sensor and the
@@ -117,17 +118,19 @@ _NOZZLE_TYPE_NAMES = {
 # --- Number parsing ---------------------------------------------------------
 
 def _num(value: Any) -> float | None:
-    """Ints, floats and numeric strings as float; anything else None."""
+    """Finite ints, floats and numeric strings as float; anything else None."""
     if isinstance(value, bool):
         return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value.strip())
-        except ValueError:
+    try:
+        if isinstance(value, (int, float)):
+            n = float(value)
+        elif isinstance(value, str):
+            n = float(value.strip())
+        else:
             return None
-    return None
+    except (ValueError, OverflowError):
+        return None
+    return n if math.isfinite(n) else None
 
 
 def _int(value: Any) -> int | None:
@@ -351,6 +354,116 @@ def firmware(info_payload: dict | None) -> str:
 
 def speed_name(level: Any) -> str:
     return _SPEED_NAMES.get(_int(level), "")
+
+
+# --- The job ----------------------------------------------------------------------
+
+# `gcode_state` values shown as they are; anything else reads UNKNOWN.
+GCODE_STATES = frozenset({"IDLE", "PREPARE", "RUNNING", "PAUSE", "FINISH", "FAILED"})
+
+
+def gcode_state(print_payload: dict) -> str:
+    value = print_payload.get("gcode_state")
+    return value if value in GCODE_STATES else "UNKNOWN"
+
+
+def _count(value: Any) -> int:
+    """A whole number from an int, float or numeric string; else 0."""
+    n = _num(value)
+    return int(n) if n is not None else 0
+
+
+def light_mode(print_payload: dict) -> str:
+    """The chamber light's mode ("on", "off", "flashing") from `lights_report`:
+    the `chamber_light` node, else the first node listed; "" when unknown."""
+    nodes = _list(print_payload.get("lights_report"))
+    node = next((n for n in nodes if n.get("node") == "chamber_light"), nodes[0] if nodes else None)
+    mode = node.get("mode") if node is not None else None
+    return mode if isinstance(mode, str) else ""
+
+
+def light_on(print_payload: dict) -> bool:
+    return light_mode(print_payload) == "on"
+
+
+def _text(value: Any) -> str:
+    return value if isinstance(value, str) else ""
+
+
+def job_fields(print_payload: dict) -> dict[str, Any]:
+    """Job progress and the files it's printing (`gcode_file`, `subtask_name`)."""
+    return {
+        "gcode_state": gcode_state(print_payload),
+        "progress": _count(print_payload.get("mc_percent")),
+        "remaining_minutes": _count(print_payload.get("mc_remaining_time")),
+        "current_layer": _count(print_payload.get("layer_num")),
+        "total_layers": _count(print_payload.get("total_layer_num")),
+        "print_speed": _count(print_payload.get("spd_mag")),
+        "light_on": light_on(print_payload),
+        "gcode_file": _text(print_payload.get("gcode_file")),
+        "subtask_name": _text(print_payload.get("subtask_name")),
+    }
+
+
+# --- Filaments ----------------------------------------------------------------------
+
+def tray_color(raw: Any) -> str:
+    """A Bambu `tray_color` ("RRGGBB" or "RRGGBBAA", alpha last) as a CSS
+    colour ("#RRGGBBAA"); "" when unusable. All zeros is the firmware's value
+    for an empty / unidentified slot, so it's "" too."""
+    if not isinstance(raw, str):
+        return ""
+    s = raw.strip().lstrip("#")
+    if len(s) not in (6, 8):
+        return ""
+    try:
+        value = int(s, 16)
+    except ValueError:
+        return ""
+    return f"#{s.upper()}" if value else ""
+
+
+def _filament(tray: Any, source: str, ams_index: int, tray_index: int) -> Filament | None:
+    """None for an empty slot (no colour, type or name)."""
+    if not isinstance(tray, dict):
+        return None
+    color = tray_color(tray.get("tray_color"))
+    ftype = tray.get("tray_type") or ""
+    fname = tray.get("tray_sub_brands") or tray.get("tray_id_name") or ""
+    if not color and not ftype and not fname:
+        return None
+    return Filament(source=source, ams_index=ams_index, tray_index=tray_index,
+                    color=color, filament_type=str(ftype), name=str(fname))
+
+
+def _index(value: Any, default: int) -> int:
+    n = _int(value)
+    return default if n is None else n
+
+
+def filaments(print_payload: dict) -> list[Filament]:
+    """Loaded spools: AMS trays, then the external spool(s): `vir_slot` (H2,
+    one per extruder) when it's a non-empty list, else `vt_tray`."""
+    out: list[Filament] = []
+    ams = print_payload.get("ams")
+    if isinstance(ams, dict) and hex_or_int(ams.get("ams_exist_bits")):
+        for unit_pos, unit in enumerate(_list(ams.get("ams"))):
+            unit_index = _index(unit.get("id"), unit_pos)
+            for slot_pos, tray in enumerate(_list(unit.get("tray"))):
+                f = _filament(tray, "ams", unit_index, _index(tray.get("id"), slot_pos))
+                if f is not None:
+                    out.append(f)
+    vir_slot = print_payload.get("vir_slot")
+    if isinstance(vir_slot, list) and vir_slot:
+        externals = list(enumerate(vir_slot))
+    else:
+        vt = print_payload.get("vt_tray")
+        externals = [(0, vt)] if isinstance(vt, dict) and vt else []
+    for pos, slot in externals:
+        f = _filament(slot, "external", pos, 0)
+        if f is not None:
+            out.append(f)
+    return out
 
 
 # --- Everything ---------------------------------------------------------------------

@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .config import load_config
 from .printer_manager import PrinterManager
@@ -32,7 +33,13 @@ async def lifespan(app: FastAPI):
     logger.info("Bamboozle stopped")
 
 
+# The server only listens on 127.0.0.1, so a request naming any other host
+# comes from a DNS-rebinding page (a site whose name resolves to 127.0.0.1,
+# which the browser then treats as same-origin with us).
+ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
+
 app = FastAPI(title="Bamboozle", lifespan=lifespan)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS, www_redirect=False)
 app.mount("/static", StaticFiles(directory="bamboozle/static"), name="static")
 app.include_router(pages.router)
 app.include_router(api.router, prefix="/api")

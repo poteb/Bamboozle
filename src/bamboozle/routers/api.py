@@ -3,11 +3,11 @@ from __future__ import annotations
 import asyncio
 import threading
 
-import bambulabs_api as bl
 from fastapi import APIRouter, HTTPException, Request
 
 from .. import discovery, mqtt, protocol
 from ..config import save_config
+from ..merge import MergedReport
 from ..models import PrinterAddRequest, PrinterConfig, PrinterState, PrinterUpdateRequest
 
 router = APIRouter()
@@ -16,6 +16,11 @@ router = APIRouter()
 # first report and (separately) the full status.
 TEST_CONNACK_TIMEOUT = 10.0
 TEST_REPORT_TIMEOUT = 5.0
+
+
+def _result(result) -> dict:
+    """A command's outcome (PrinterManager.execute_command) as JSON."""
+    return result._asdict()
 
 
 @router.get("/printers")
@@ -108,47 +113,41 @@ async def delete_printer(request: Request, printer_id: str) -> dict:
 @router.post("/printers/{printer_id}/pause")
 async def pause_print(request: Request, printer_id: str) -> dict:
     manager = request.app.state.manager
-    ok, msg = await manager.execute_command(printer_id, "pause")
-    return {"success": ok, "message": msg}
+    return _result(await manager.execute_command(printer_id, "pause"))
 
 
 @router.post("/printers/{printer_id}/resume")
 async def resume_print(request: Request, printer_id: str) -> dict:
     manager = request.app.state.manager
-    ok, msg = await manager.execute_command(printer_id, "resume")
-    return {"success": ok, "message": msg}
+    return _result(await manager.execute_command(printer_id, "resume"))
 
 
 @router.post("/printers/{printer_id}/stop")
 async def stop_print(request: Request, printer_id: str) -> dict:
     manager = request.app.state.manager
-    ok, msg = await manager.execute_command(printer_id, "stop")
-    return {"success": ok, "message": msg}
+    return _result(await manager.execute_command(printer_id, "stop"))
 
 
 @router.post("/printers/{printer_id}/light")
 async def toggle_light(request: Request, printer_id: str, body: dict) -> dict:
     action = "light_on" if body.get("on", True) else "light_off"
     manager = request.app.state.manager
-    ok, msg = await manager.execute_command(printer_id, action)
-    return {"success": ok, "message": msg}
+    return _result(await manager.execute_command(printer_id, action))
 
 
 @router.post("/printers/{printer_id}/speed")
 async def set_speed(request: Request, printer_id: str, body: dict) -> dict:
     manager = request.app.state.manager
-    ok, msg = await manager.execute_command(
-        printer_id, "set_speed", {"level": body.get("level", 1)}
-    )
-    return {"success": ok, "message": msg}
+    return _result(await manager.execute_command(
+        printer_id, "set_speed", {"level": body.get("level")}
+    ))
 
 
 @router.post("/printers/{printer_id}/refresh")
 async def refresh_printer(request: Request, printer_id: str) -> dict:
     """Ask the printer for a full status report (pushall)."""
     manager = request.app.state.manager
-    ok, msg = await manager.execute_command(printer_id, "refresh")
-    return {"success": ok, "message": msg}
+    return _result(await manager.execute_command(printer_id, "refresh"))
 
 
 @router.post("/printers/{printer_id}/camera")
@@ -185,29 +184,33 @@ async def test_connection(body: PrinterAddRequest) -> dict:
     if not reachable:
         return {"success": False, "message": f"printer unreachable at {body.ip}"}
 
-    printer = bl.Printer(body.ip, body.access_code, body.serial)
-    mqtt_client = printer.mqtt_client
+    loop = asyncio.get_running_loop()
     connack: list = []
     got_connack = threading.Event()
     got_report = threading.Event()  # anything on the serial's report topic
-    got_status = threading.Event()  # a report carrying gcode_state
+    got_status = asyncio.Event()  # the merged report has a gcode_state
+    report = MergedReport()
 
-    def on_connect(_mqtt, _client, _userdata, _flags, rc, _props):
+    def on_connect(rc):
         connack.append(rc)
         got_connack.set()
 
-    def gcode_state() -> str | None:
-        return (mqtt_client.dump().get("print") or {}).get("gcode_state")
-
-    def on_message(*_):
-        got_report.set()
-        if gcode_state():
+    def ingest(payload):  # on the event loop
+        report.apply(payload)
+        if report.print.get("gcode_state"):
             got_status.set()
 
-    mqtt_client.on_connect_handler = on_connect
-    mqtt_client.on_message_handler = on_message
+    def on_report(payload):  # on paho's thread
+        got_report.set()
+        try:
+            loop.call_soon_threadsafe(ingest, payload)
+        except RuntimeError:
+            pass  # the request is over
+
+    client = mqtt.BambuClient(body.ip, body.access_code, body.serial,
+                              on_connack=on_connect, on_report=on_report)
     try:
-        await asyncio.to_thread(printer.mqtt_start)
+        await asyncio.to_thread(client.start)
         if not await asyncio.to_thread(got_connack.wait, TEST_CONNACK_TIMEOUT):
             return {"success": False,
                     "message": f"MQTT login to {body.ip} timed out"}
@@ -219,19 +222,13 @@ async def test_connection(body: PrinterAddRequest) -> dict:
         if not await asyncio.to_thread(got_report.wait, TEST_REPORT_TIMEOUT):
             return {"success": False,
                     "message": "Connected, but the printer sent no data: check the serial number"}
-        if not got_status.is_set():
-            # A1 / P1S ignore the library's combined on-connect request, so
-            # ask for the full status on its own.
-            # Login and serial are proven already, so a failure here only
-            # costs the state; the publish wait has no timeout of its own.
-            try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(mqtt_client.pushall), TEST_REPORT_TIMEOUT
-                )
-                await asyncio.to_thread(got_status.wait, TEST_REPORT_TIMEOUT)
-            except Exception:
-                pass
-        state = gcode_state()
+        # Login and serial are proven; the client's on-connect pushall brings
+        # the full status (A1 / P1S otherwise only send deltas).
+        try:
+            await asyncio.wait_for(got_status.wait(), TEST_REPORT_TIMEOUT)
+        except asyncio.TimeoutError:
+            pass
+        state = report.print.get("gcode_state")
         return {
             "success": True,
             "message": f"Connected successfully. State: {state}" if state
@@ -240,4 +237,4 @@ async def test_connection(body: PrinterAddRequest) -> dict:
     except Exception as e:
         return {"success": False, "message": str(e)}
     finally:
-        mqtt.retire(printer)
+        mqtt.retire(client)

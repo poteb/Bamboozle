@@ -2,12 +2,12 @@
 background, with misses remembered, and never for files on internal storage."""
 import asyncio
 
-import bambulabs_api as bl
 import pytest
 
-from bamboozle import discovery, protocol, thumbnail
+from bamboozle import discovery, mqtt, protocol, thumbnail
 from bamboozle.models import PrinterConfig
 from bamboozle.printer_manager import PrinterConnection
+from fakes import deliver
 
 RETRY = 0.2
 
@@ -15,8 +15,8 @@ RETRY = 0.2
 @pytest.fixture
 def lan(monkeypatch):
     monkeypatch.setattr(discovery, "tcp_reachable", lambda ip, port=8883, timeout=3.0: True)
-    monkeypatch.setattr(bl.Printer, "mqtt_start", lambda self: None)
-    monkeypatch.setattr(bl.PrinterMQTTClient, "is_connected", lambda self: True)
+    monkeypatch.setattr(mqtt.BambuClient, "start", lambda self: None)
+    monkeypatch.setattr(mqtt.BambuClient, "is_connected", lambda self: True)
     monkeypatch.setattr(PrinterConnection, "MQTT_SETTLE_SECONDS", 0)
     monkeypatch.setattr(PrinterConnection, "THUMB_RETRY_SECONDS", RETRY)
 
@@ -59,9 +59,7 @@ async def _connected():
 
 
 def report(conn, payload):
-    mc = conn.printer.mqtt_client
-    mc.manual_update(payload)
-    mc.on_message_handler(mc, None, None, None)
+    deliver(conn.client, payload)
 
 
 async def poll(conn, times=1):

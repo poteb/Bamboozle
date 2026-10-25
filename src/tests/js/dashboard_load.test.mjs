@@ -289,3 +289,26 @@ test('a command with no REST equivalent toasts that the dashboard is reconnectin
     assert.equal(toasts.length, 1);
     assert.match(toasts[0].message, /reconnecting/i);
 });
+
+test('a REST command sent but not confirmed by the printer toasts as info', async () => {
+    const { app, fetches, toasts } = setup();
+    const done = app.sendCommand('p1', 'pause');
+    fetches[1].resolve(okResponse({ success: true, confirmed: false, message: 'Pause sent, but not confirmed' }));
+    await done;
+    assert.equal(toasts[0].type, 'info');
+});
+
+for (const [result, type] of [
+    [{ success: true, confirmed: true }, 'success'],
+    [{ success: true, confirmed: false }, 'info'],
+    [{ success: true }, 'success'],
+    [{ success: false, confirmed: false }, 'error'],
+    [{ success: false, confirmed: null }, 'error'],
+]) {
+    test(`a WS command result ${JSON.stringify(result)} toasts as ${type}`, () => {
+        const { app, sockets, toasts } = setup();
+        sockets[0].open();
+        sockets[0].receive({ type: 'command_result', printer_id: 'p1', action: 'pause', message: 'm', ...result });
+        assert.equal(toasts.at(-1).type, type);
+    });
+}

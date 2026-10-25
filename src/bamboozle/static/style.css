@@ -381,7 +381,15 @@
     white-space: nowrap;
 }
 
-.error-desc {
+/* A described message: the text first, the module and code small below. */
+.error-meta {
+    font-size: 0.85em;
+    opacity: 0.7;
+}
+
+/* Bambu lists the code without text: our placeholder, set apart. */
+.error-line.undocumented .error-text {
+    font-style: italic;
     opacity: 0.8;
 }
 

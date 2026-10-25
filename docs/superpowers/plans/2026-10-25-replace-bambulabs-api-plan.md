@@ -1,0 +1,12 @@
+# Replace `bambulabs_api`: implementation plan
+
+Spec: `docs/superpowers/specs/2026-10-25-replace-bambulabs-api-design.md`. TDD per step (test red, then green), one commit per step or two.
+
+1. **`merge.py` + `snapshot.py` + report additions** (pure). Unit tests per merge rule (`test_merge.py`), fixture replays (`test_merge_fixtures.py`): P1S trays never blank, A1 spool insert, A1 print start, merged == alone at full reports, merged-from-deltas == next full report on A1/P1S (drift fields excluded), synthesised H2C/P2S deltas. Negative control: a one-level merge must fail the P1S/A1 tests. *(done: 3f96dc7, refined after the spec review)*
+2. **`commands.py`** (pure): payloads per model, validation, confirmation predicates (`test_commands.py`).
+3. **`mqtt.py` `BambuClient`**: paho settings (VERSION2, no auto-reconnect, inflight 1000, keepalive 30, TLS 1.2+ no verify, suppress_exceptions, client id with process id + token), SUBACK → pushall, tolerant decode, publish refuses while down, retire clears all four callbacks. Tests with a fake paho (`test_mqtt_client.py`, `test_mqtt_teardown.py` ported).
+4. **`PrinterConnection`**: client-tagged loop handoff, `_ingest`, drop → reset, pushall until a full report, read_state atomic, waiters (first request's command + id, mid-wait pushall, refusal only without confirmation), thumbnail `on_change`. Port `test_staleness`, `test_auth_rejected`, `test_connection_health`, `test_unreachable`, `test_thumbnail_policy`, `test_developer_mode`, `test_errors`, `test_report_fields`, `test_light_refresh`.
+5. **`PrinterManager`**: batched 0.3 s flush, broadcast lock, send timeout, dedupe, heartbeat, `execute_command` → `CommandResult`, push at once on confirmation. Port `test_poll_stall`; new `test_event_updates.py`, `test_command_verification.py`.
+6. **Routers / frontend / main**: REST + WS `confirmed`, ws task set + cap + Origin check, TrustedHostMiddleware, test endpoint on `BambuClient`; `app.js` info toast (`dashboard_load.test.mjs`). Security tests (`test_security.py`): cross-origin WS refused, foreign Host refused, bad params refused, hostile payloads.
+7. **Cleanup**: requirements (`paho-mqtt>=2.0,<3`), no `bambulabs_api` anywhere (an import-blocking test), CLAUDE.md, capture tool still imports its builders.
+8. **Verify**: pytest + node; live run on port 8093 (temp LOCALAPPDATA, only pushall / get_version), measuring report → WS latency and checking that cards never flicker (filament lists never shrink); then reviews (self `code-review`, independent opus, second opus), merge.

@@ -80,14 +80,60 @@ test('lingering messages are a quiet collapsed line, not an active fault', () =>
     assert.doesNotMatch(html, /card-errors-active/);
     // aria-live off: only active errors are announced, not lingering ones.
     assert.match(html, /^<details class="card-errors-lingering" aria-live="off"><summary>2 printer messages<\/summary>/);
-    // Each still links to the wiki; ours-described codes carry the description.
+    // Each still links to the wiki.
     assert.match(html, /0500_0500_0001_0007/);
-    assert.match(html, /Developer Mode allows them/);
     assert.match(html, /e=0500060000020006/);
 });
 
 test('the refused-command record reads as a note, not an error', () => {
-    assert.match(plain(app.errorLineHtml(REFUSED)), /^System · 0500_0500_0001_0007A LAN command/);
+    const el = fakeEl();
+    app.applyErrors(el, printer([REFUSED]));
+    assert.deepEqual(el.texts, [REFUSED.description]);
+    assert.equal(plain(app.errorLineHtml(REFUSED)), 'System · 0500_0500_0001_0007');
+});
+
+// Bambu's catalogue text (hms_catalog.py), made up here.
+const DESCRIBED = { ...RUNOUT, description: 'Made-up runout text.' };
+const UNDOCUMENTED = {
+    ...H2C_OTHER, description: 'No description from Bambu (internal code)', undocumented: true,
+};
+
+test('a described message leads with its text; the code is small secondary text with the link', () => {
+    const html = app.errorLineHtml(DESCRIBED);
+    assert.match(html, /^<div class="error-line"><div class="error-desc">Warning · <span class="error-text"><\/span><\/div><div class="error-meta">AMS 2 · <a href="https:\/\/e\.bambulab\.com\/[^"]*"[^>]*>0701_2000_0002_0001<\/a><\/div><\/div>$/);
+});
+
+test('a message without text keeps the code-only line', () => {
+    assert.equal(app.errorLineHtml(RUNOUT).includes('error-meta'), false);
+    assert.equal(plain(app.errorLineHtml(RUNOUT)), 'Warning · AMS 2 · 0701_2000_0002_0001');
+});
+
+test('descriptions never go through HTML: they are set with textContent', () => {
+    const evil = { ...DESCRIBED, description: '<img src=x onerror=alert(1)>' };
+    const html = app.errorsHtml(printer([evil]));
+    assert.doesNotMatch(html, /img|onerror|alert/);
+    const el = fakeEl();
+    app.applyErrors(el, printer([evil]));
+    assert.deepEqual(el.texts, ['<img src=x onerror=alert(1)>']);
+});
+
+test('texts land on their own lines: active first, then lingering, skipping lines without text', () => {
+    const el = fakeEl();
+    app.applyErrors(el, printer([DESCRIBED, { ...RUNOUT, active: false }, UNDOCUMENTED]));
+    assert.deepEqual(el.texts, ['Made-up runout text.', 'No description from Bambu (internal code)']);
+});
+
+test('a code Bambu has no text for is marked as such', () => {
+    assert.match(app.errorLineHtml(UNDOCUMENTED), /^<div class="error-line undocumented">/);
+    assert.doesNotMatch(app.errorLineHtml(DESCRIBED), /undocumented/);
+});
+
+test('the card is rewritten when a description arrives', () => {
+    const el = fakeEl();
+    app.applyErrors(el, printer([RUNOUT]));
+    app.applyErrors(el, printer([DESCRIBED]));
+    assert.equal(el.writes, 2);
+    assert.deepEqual(el.texts, ['Made-up runout text.']);
 });
 
 test('one lingering message is singular', () => {
@@ -118,18 +164,24 @@ test('a code without an https link is plain text', () => {
 });
 
 test('error fields are escaped', () => {
-    const html = app.errorLineHtml({ ...RUNOUT, module: '<b>', description: '"x" & y' });
-    assert.match(html, /&lt;b&gt;/);
-    assert.match(html, /&quot;x&quot; &amp; y/);
+    assert.match(app.errorLineHtml({ ...RUNOUT, module: '<b>' }), /&lt;b&gt;/);
+    assert.match(app.errorLineHtml({ ...DESCRIBED, module: '<b>' }), /&lt;b&gt;/);
 });
 
+// An element whose innerHTML is recorded and whose `.error-text` spans (one
+// per placeholder in the HTML) record what's written to their textContent.
 function fakeEl() {
-    let writes = 0, html = '';
+    let writes = 0, html = '', spans = [];
     return {
         dataset: {},
         get innerHTML() { return html; },
-        set innerHTML(v) { html = v; writes++; },
+        set innerHTML(v) {
+            html = v; writes++;
+            spans = (v.match(/<span class="error-text"><\/span>/g) || []).map(() => ({ textContent: '' }));
+        },
+        querySelectorAll(sel) { return sel === '.error-text' ? spans : []; },
         get writes() { return writes; },
+        get texts() { return spans.map((n) => n.textContent); },
     };
 }
 
