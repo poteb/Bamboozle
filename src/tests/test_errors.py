@@ -140,9 +140,31 @@ def test_running_job_messages_are_not_active():
     assert not e.active
 
 
+def test_notices_never_explain_a_stopped_job():
+    """Common / info levels are notifications (e.g. the P2S's lubrication
+    reminder 0501_0400_0003_0002); they don't stop or pause a job."""
+    [e] = hms.printer_errors({"gcode_state": "PAUSE",
+                              "hms": [{"attr": 0x05010400, "code": 0x00030002}]})
+    assert not e.active
+
+
+@pytest.mark.parametrize("payload", [
+    {"gcode_state": "FAILED", "print_error": 0x0300400C},   # cancelled by the user
+    {"gcode_state": "FAILED", "print_error": 0x0500400E},
+    {"gcode_state": "PAUSE", "stg_cur": 16},                # paused by the user
+    {"gcode_state": "PAUSE", "stg_cur": "30"},              # paused by the G-code
+    {"gcode_state": "PAUSE", "stg_cur": 5},                 # M400 pause
+])
+def test_a_job_the_user_stopped_has_no_active_errors(payload):
+    """The messages were there before; they aren't why the job stopped."""
+    errors = hms.printer_errors({**payload, "hms": [H2C_OTHER, AMS2_RUNOUT]})
+    assert len(errors) == 2
+    assert not any(e.active for e in errors)
+
+
 def test_refused_command_record_is_never_active():
-    """0500050000010007 records a refused LAN command; the H2C and P2S carry it
-    while the light works, so it never explains a paused job."""
+    """0500050000010007 records a refused LAN command; all four of the user's
+    printers carry it while the light works, so it never explains a paused job."""
     errors = hms.printer_errors({"gcode_state": "PAUSE", "hms": [VERIFY_FAILED, AMS2_RUNOUT]})
     assert [(e.code, e.active) for e in errors] == [
         ("0701_2000_0002_0001", True), ("0500_0500_0001_0007", False)]

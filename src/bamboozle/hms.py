@@ -21,7 +21,7 @@ from typing import Any
 
 from .models import PrinterError
 from .protocol import hms_codes
-from .report import ams_name
+from .report import ams_name, stage
 
 # HMS level (high half of `code`); 0 is invalid.
 _HMS_LEVELS = {1: "fatal", 2: "serious", 3: "common", 4: "info"}
@@ -52,12 +52,17 @@ _DESCRIPTIONS = {
     _REFUSED_COMMAND: "A LAN command was refused earlier: it couldn't be verified "
                       "(Developer Mode allows them). It stays listed; not a fault.",
 }
-# Records of something that happened, never why a job is paused: the user's
-# H2C and P2S carry the refused-command code while the light works.
+# Records of something that happened, never why a job is paused: all four of
+# the user's printers carry the refused-command code while the light works.
 _RECORD_ONLY = frozenset({_REFUSED_COMMAND})
 
-# A job in these states stopped for a reason, which its errors explain.
+# A job in these states stopped for a reason, which its errors may explain.
 _STOPPED_JOB = frozenset({"PAUSE", "FAILED"})
+# ... unless it was the user (or the file) that stopped it: `stg_cur` 5 (M400
+# pause), 16 (paused by the user), 30 (paused by the G-code), or a cancel.
+_USER_PAUSE_STAGES = frozenset({5, 16, 30})
+# Levels that stop or pause a job; common / info are notifications.
+_STOPPING_LEVELS = frozenset({"fatal", "serious"})
 
 HMS_URL = "https://e.bambulab.com/index.php?e={code}&s=device_hms&lang=en"
 PRINT_ERROR_URL = "https://wiki.bambulab.com/en/hms/error-code#:~:text={module:04X}-{error:04X}"
@@ -124,11 +129,31 @@ def print_error(print_payload: dict) -> PrinterError | None:
     )
 
 
+def _stopped_by_fault(print_payload: dict) -> bool:
+    """The job is paused or failed, and not by the user or the G-code."""
+    if print_payload.get("gcode_state") not in _STOPPED_JOB:
+        return False
+    if stage(print_payload) in _USER_PAUSE_STAGES:
+        return False
+    value = _print_error_value(print_payload.get("print_error"))
+    if value and _short_code((value >> 16) & 0xFFFF, value & 0xFFFF) in _USER_CANCEL:
+        return False
+    return True
+
+
+def _explains_stop(e: PrinterError) -> bool:
+    if e.kind == "print_error":
+        return True  # the job's own error
+    return e.severity in _STOPPING_LEVELS and e.code.replace("_", "") not in _RECORD_ONLY
+
+
 def printer_errors(print_payload: dict) -> list[PrinterError]:
     """HMS messages and the print error: active ones first, then by severity.
 
-    They're active while the job is paused or failed (they say why), except
-    records like the refused-command code. Otherwise they're lingering: the
+    Active means it likely explains why the job is paused or failed: the job
+    stopped on its own (not paused / cancelled by the user), and the error is
+    the print error or an HMS at a level that stops or pauses a job (not a
+    record like the refused-command code). The rest are lingering: the
     printer keeps HMS messages until they're acknowledged on it.
     """
     errors = hms_errors(print_payload)
@@ -136,9 +161,9 @@ def printer_errors(print_payload: dict) -> list[PrinterError]:
     # The same fault is often raised as both; the HMS form says more.
     if pe and not any(_hms_short(e.code) == pe.code for e in errors):
         errors.append(pe)
-    stopped = print_payload.get("gcode_state") in _STOPPED_JOB
+    stopped = _stopped_by_fault(print_payload)
     for e in errors:
-        e.active = stopped and e.code.replace("_", "") not in _RECORD_ONLY
+        e.active = stopped and _explains_stop(e)
     return sorted(errors, key=lambda e: (not e.active, _SEVERITY_ORDER.index(e.severity)))
 
 
