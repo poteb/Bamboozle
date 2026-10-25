@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import unquote
 
 # `fun` is a hex bitfield sent by newer firmware (H2*, P2S, X1 on the 2025
 # authorization firmware); A1 / P1 don't send it. When this bit is SET,
@@ -112,9 +113,14 @@ def file_on_internal_storage(print_payload: dict) -> bool:
     external storage only): no SD card / USB drive is inserted, or the job
     was sent to internal storage.
 
-    Reports are merged, so `url` is from the latest `project_file` seen.
+    Reports are merged, so `url` is from the latest `project_file` seen; it
+    only counts when it names the current job (`subtask_name`).
     """
     if print_payload.get("sdcard") is False:
         return True
     url = print_payload.get("url")
-    return isinstance(url, str) and url.lower().startswith(_INTERNAL_URL_PREFIXES)
+    subtask = print_payload.get("subtask_name")
+    if not isinstance(url, str) or not isinstance(subtask, str) or not subtask:
+        return False
+    url = unquote(url)
+    return url.lower().startswith(_INTERNAL_URL_PREFIXES) and subtask in url

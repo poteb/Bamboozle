@@ -324,7 +324,7 @@ class PrinterConnection:
             state_data.last_error = self._down_reason  # until the first report
             self._update_thumbnail(job)
             state_data.has_thumbnail = self.thumbnail is not None
-            state_data.thumbnail_key = self._thumb_key if self.thumbnail is not None else ""
+            state_data.thumbnail_key = self._thumb_key  # set and cleared with it
             state_data.thumbnail_unavailable = (
                 protocol.THUMBNAIL_INTERNAL_STORAGE if job.key and job.internal else ""
             )

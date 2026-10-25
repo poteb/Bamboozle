@@ -56,8 +56,8 @@ class PrinterState(BaseModel):
     camera_available: bool = False
     has_thumbnail: bool = False
     thumbnail_key: str = ""
-    # Why the job can't have a thumbnail, when known (protocol.
-    # THUMBNAIL_INTERNAL_STORAGE: the file isn't on the FTPS share).
+    # Why the job can't have a thumbnail, when known
+    # (protocol.THUMBNAIL_INTERNAL_STORAGE: the file isn't on the FTPS share).
     thumbnail_unavailable: Literal["", "internal_storage"] = ""
     filaments: list[Filament] = []
     error_code: int = 0

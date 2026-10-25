@@ -39,7 +39,7 @@ Single FastAPI app (`bamboozle.main:app`) with a lifespan that builds a `Printer
 **`PrinterManager`** (`printer_manager.py`) is the core. It owns:
 - A dict of `PrinterConnection` objects keyed by printer id.
 - A set of WebSocket clients.
-- A single `_poll_loop` task that sleeps `poll_interval` seconds, reads state from every printer, auto-reconnects any that dropped, and broadcasts `{"type": "update", "printers": {...}}` to all WS clients.
+- A single `_poll_loop` task that sleeps `poll_interval` seconds, polls every printer concurrently (health checks, auto-reconnect, state read), and broadcasts `{"type": "update", "printers": {...}}` to all WS clients. Each printer's poll step gets `POLL_STEP_TIMEOUT_SECONDS` (2 s); a slower one is broadcast with its last known state, and the next round waits on the same step instead of starting another. Never put blocking network I/O in a state read: one slow printer used to freeze every card.
 
 Connections start in the background (`asyncio.create_task(self._connect_printer(...))`) so `start()`, `add_printer`, and `update_printer` never block the HTTP response on MQTT handshakes.
 
@@ -48,7 +48,7 @@ Connections start in the background (`asyncio.create_task(self._connect_printer(
 2. A `CameraStream` (see below).
 3. The latest `PrinterState` pydantic model (sent to the frontend via `model_dump(mode="json")`).
 
-Thumbnails are fetched once per new print job (keyed on `subtask_name` or `file_name`) via `thumbnail.fetch_thumbnail` and cached on the connection.
+Thumbnails come from the job's 3MF over FTPS (`thumbnail.fetch_thumbnail`, TLS 1.2, one connection walking `/cache`, `/`, `/model`, `/data` for `gcode_file` / `subtask_name` name variants). `PrinterConnection` starts the fetch after a state read, as a background task on a daemon thread (shutdown never waits for it), at most one per printer, with a 240 s deadline, cancelled on disconnect. It's keyed on `subtask_name` or `file_name`: a 3MF that isn't on the printer is not looked up again for that job; other failures retry after 60 s, doubling to 15 min. FTPS (port 990) only serves external storage, so a job on internal storage (`sdcard: false`, or a `brtc://emmc/` / `file:///userdata/` `url` naming the job) is never looked up; `PrinterState.thumbnail_unavailable = "internal_storage"` and the card says why.
 
 **`CameraStream`** (`camera.py`) supports two wire protocols selected by port:
 - **Port 6000** (A1 / P1 / P1S): raw TLS socket with a custom 80-byte auth packet (`_build_auth_packet`) and a 16-byte-header framing protocol. Implemented inline.

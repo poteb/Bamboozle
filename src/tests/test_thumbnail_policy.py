@@ -171,6 +171,20 @@ def test_a_job_sent_to_internal_storage_is_not_looked_up(lan, fetches, url):
     assert state.thumbnail_unavailable == "internal_storage"
 
 
+def test_an_earlier_jobs_internal_url_does_not_stick_to_the_next_job(lan, fetches):
+    """Reports are merged, so `url` stays until the next project_file."""
+    async def scenario():
+        conn = await _connected()
+        report(conn, job("Cube", url="brtc://emmc/Cube.gcode.3mf"))
+        await poll(conn)
+        report(conn, job("Benchy"))  # e.g. started from the SD card
+        return await poll(conn, 2)
+
+    state = asyncio.run(scenario())
+    assert fetches == [("Benchy.3mf", "Benchy")]
+    assert state.thumbnail_unavailable == ""
+
+
 def test_a_job_on_external_storage_is_looked_up(lan, fetches):
     async def scenario():
         conn = await _connected()
