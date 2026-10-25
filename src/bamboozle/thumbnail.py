@@ -68,6 +68,7 @@ def _connect_ftp(ip: str, access_code: str, port: int = 990) -> ftplib.FTP_TLS:
     """Connect to printer's implicit FTPS on port 990."""
     ctx = _tls_context()
     sock = socket.create_connection((ip, port), timeout=SOCKET_TIMEOUT_SECONDS)
+    ftp = None
     try:
         sock = ctx.wrap_socket(sock, server_hostname=ip)
         ftp = _new_ftp(ctx)
@@ -80,7 +81,10 @@ def _connect_ftp(ip: str, access_code: str, port: int = 990) -> ftplib.FTP_TLS:
         ftp.prot_p()
         return ftp
     except BaseException:
-        sock.close()  # e.g. "421 too many connections": don't leak the socket
+        # e.g. "421 too many connections": don't leak the socket
+        if ftp is not None:
+            ftp.close()  # also drops the makefile() reader holding it open
+        sock.close()
         raise
 
 
@@ -150,7 +154,9 @@ def fetch_thumbnail(
         logger.debug("No 3MF for %r / %r on %s", gcode_file, subtask_name, ip)
         return None
     buf.seek(0)
-    return _extract_plate_thumbnail(buf, _plate_number(gcode_file))
+    # Only a G-code path names the plate; a 3MF name is the project's.
+    plate = _plate_number(gcode_file) if gcode_file.lower().endswith(".gcode") else None
+    return _extract_plate_thumbnail(buf, plate)
 
 
 def _quit(ftp: ftplib.FTP) -> None:

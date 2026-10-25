@@ -80,7 +80,8 @@ def test_a_slow_read_does_not_stall_the_other_printers(lan, monkeypatch):
     finally:
         release.set()
     fresh = _fresh_updates(ws, "fast", since)
-    assert len(fresh) >= 3
+    # Not held up by the stuck step on every round either (~0.12 s a round).
+    assert len(fresh) >= 12
     # The stuck printer is still listed, with its last known state.
     assert all("slow" in m["printers"] for m in fresh)
 
@@ -153,3 +154,40 @@ def test_shutdown_does_not_wait_for_a_thumbnail_download(lan, monkeypatch):
     finally:
         stuck.set()
     assert elapsed < 1.5
+
+
+def test_a_printer_removed_mid_poll_is_not_broadcast_again(lan, monkeypatch):
+    release = threading.Event()
+    real_read = PrinterConnection._read_sync
+
+    def read(self):
+        release.wait(5)
+        return real_read(self)
+
+    monkeypatch.setattr(PrinterConnection, "_read_sync", read)
+
+    async def scenario():
+        mgr = PrinterManager(
+            AppConfig(printers=[_cfg("gone", "192.168.0.50")], poll_interval=0.02),
+            discovery_port=None,
+        )
+        ws = FakeWs()
+        mgr.register_ws(ws)
+        await mgr.start()
+        await asyncio.sleep(0.05)  # a poll round is waiting on the read
+        await mgr.remove_printer("gone")
+        removed_at = len(ws.sent)
+        release.set()
+        await asyncio.sleep(0.2)
+        await mgr.stop()
+        return ws.sent[removed_at:]
+
+    try:
+        after = asyncio.run(scenario())
+    finally:
+        release.set()
+    # The dashboard merges updates, so one stale broadcast would bring the
+    # removed printer back on screen until a reload.
+    updates = [m for m in after if m.get("type") == "update"]
+    assert updates
+    assert not any("gone" in m["printers"] for m in updates)

@@ -191,3 +191,8 @@ def test_data_connections_time_out_too():
     """Only the control socket had a timeout; a stalled transfer hung forever."""
     ftp = thumbnail._new_ftp(thumbnail._tls_context())
     assert ftp.timeout == thumbnail.SOCKET_TIMEOUT_SECONDS
+
+
+def test_a_plate_number_in_a_project_name_is_not_the_plate(ftp):
+    ftp({"/cache/plate_3 holder.3mf": _3mf(1, gcode=[1])})
+    assert thumbnail.fetch_thumbnail("ip", "code", "plate_3 holder.3mf", "plate_3 holder") == b"PNG1"

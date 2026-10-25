@@ -5,11 +5,11 @@ import asyncio
 import bambulabs_api as bl
 import pytest
 
-from bamboozle import discovery, thumbnail
+from bamboozle import discovery, protocol, thumbnail
 from bamboozle.models import PrinterConfig
 from bamboozle.printer_manager import PrinterConnection
 
-RETRY = 0.05
+RETRY = 0.2
 
 
 @pytest.fixture
@@ -214,3 +214,29 @@ def test_disconnect_cancels_a_running_fetch(lan, monkeypatch):
 
     asyncio.run(scenario())
     assert seen["cancel"].is_set()
+
+
+def test_printing_the_same_project_again_looks_it_up_again(lan, fetches):
+    """Bambu keeps subtask_name after a print ends; a reprint is a new job."""
+    fetches.result = None
+
+    async def scenario():
+        conn = await _connected()
+        report(conn, job())
+        await poll(conn, 2)
+        report(conn, job(state="FINISH"))
+        await poll(conn, 2)
+        fetches.result = b"PNG"
+        report(conn, job(state="PREPARE"))
+        return await poll(conn, 2)
+
+    state = asyncio.run(scenario())
+    assert len(fetches) == 2
+    assert state.has_thumbnail is True
+
+
+def test_an_internal_url_for_a_longer_named_job_does_not_match():
+    payload = {"sdcard": True, "subtask_name": "Cube", "url": "brtc://emmc/Cube%20Big.gcode.3mf"}
+    assert protocol.file_on_internal_storage(payload) is False
+    payload["url"] = "brtc://emmc/Cube.gcode.3mf"
+    assert protocol.file_on_internal_storage(payload) is True

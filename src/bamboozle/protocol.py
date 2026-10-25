@@ -123,4 +123,11 @@ def file_on_internal_storage(print_payload: dict) -> bool:
     if not isinstance(url, str) or not isinstance(subtask, str) or not subtask:
         return False
     url = unquote(url)
-    return url.lower().startswith(_INTERNAL_URL_PREFIXES) and subtask in url
+    if not url.lower().startswith(_INTERNAL_URL_PREFIXES):
+        return False
+    name = url.rsplit("/", 1)[-1]
+    for ext in (".gcode.3mf", ".3mf"):
+        if name.lower().endswith(ext):
+            name = name[: -len(ext)]
+            break
+    return name in (subtask, subtask.replace(" ", "_"))

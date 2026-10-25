@@ -92,6 +92,8 @@ class PrinterConnection:
     # printer is not looked up again.
     THUMB_RETRY_SECONDS = 60.0
     THUMB_MAX_RETRY_SECONDS = 900.0
+    _JOB_ACTIVE = frozenset({"PREPARE", "RUNNING"})
+    _JOB_ENDED = frozenset({"FINISH", "FAILED", "IDLE"})
 
     def __init__(self, cfg: PrinterConfig):
         self.cfg = cfg
@@ -108,6 +110,7 @@ class PrinterConnection:
         self._thumb_backoff = self.THUMB_RETRY_SECONDS
         self._thumb_task: asyncio.Task | None = None
         self._thumb_cancel = threading.Event()
+        self._thumb_last_state = ""  # gcode_state at the previous read
         # The manager's in-flight poll step for this printer (see _poll_all).
         self.poll_step: asyncio.Task | None = None
         self._backoff = self.INITIAL_BACKOFF_SECONDS
@@ -460,11 +463,17 @@ class PrinterConnection:
         At most one fetch runs per printer (the printer allows few FTP
         sessions). Runs on the event loop; the fetch itself never does.
         """
+        # Bambu keeps the names after a print ends, so a reprint of the same
+        # project shows up as the state going from ended back to active.
+        restarted = (
+            job.gcode_state in self._JOB_ACTIVE and self._thumb_last_state in self._JOB_ENDED
+        )
+        self._thumb_last_state = job.gcode_state
         if not job.key:
             if job.gcode_state == "IDLE":
                 self._forget_thumbnail()
             return
-        if job.key != self._thumb_job:
+        if job.key != self._thumb_job or restarted:
             self._forget_thumbnail()  # not the previous job's picture
             self._thumb_job = job.key
         if (
@@ -1071,14 +1080,18 @@ class PrinterManager:
         """Poll every printer at once; a slow one can't hold up the rest."""
         conns = list(self._connections.items())
         await asyncio.gather(*(self._await_poll_step(pid, conn) for pid, conn in conns))
-        return {pid: conn.state.model_dump(mode="json") for pid, conn in conns}
+        # Printers as they are now: one removed (or replaced) meanwhile must
+        # not be broadcast; the dashboard merges updates and would keep it.
+        return {pid: conn.state.model_dump(mode="json") for pid, conn in self._connections.items()}
 
     async def _await_poll_step(self, pid: str, conn: PrinterConnection) -> None:
         step = conn.poll_step
+        timeout = 0.0  # a step still running from an earlier round: don't wait again
         if step is None or step.done():
             step = conn.poll_step = self._spawn(self._poll_step(pid, conn))
+            timeout = self.POLL_STEP_TIMEOUT_SECONDS
         try:
-            await asyncio.wait_for(asyncio.shield(step), self.POLL_STEP_TIMEOUT_SECONDS)
+            await asyncio.wait_for(asyncio.shield(step), timeout)
         except asyncio.TimeoutError:
             pass  # still running; this round shows the last known state
 
