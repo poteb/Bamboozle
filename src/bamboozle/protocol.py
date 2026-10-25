@@ -98,3 +98,23 @@ def connack_failed(reason_code: Any) -> bool:
 def is_auth_refusal(reason_code: Any) -> bool:
     """True for a CONNACK refusing our credentials (ReasonCode, or 134 / 135)."""
     return getattr(reason_code, "value", reason_code) in _AUTH_REFUSAL_CODES
+
+
+# Where a print file is stored, from the `url` echoed in a `project_file`
+# report (sent when a print starts): `ftp://<name>` is external storage
+# (SD card / USB drive), these are the internal eMMC (H2 series, P2S default).
+_INTERNAL_URL_PREFIXES = ("brtc://emmc/", "file:///userdata/")
+THUMBNAIL_INTERNAL_STORAGE = "internal_storage"
+
+
+def file_on_internal_storage(print_payload: dict) -> bool:
+    """True when the print file can't be on the FTPS share (port 990 serves
+    external storage only): no SD card / USB drive is inserted, or the job
+    was sent to internal storage.
+
+    Reports are merged, so `url` is from the latest `project_file` seen.
+    """
+    if print_payload.get("sdcard") is False:
+        return True
+    url = print_payload.get("url")
+    return isinstance(url, str) and url.lower().startswith(_INTERNAL_URL_PREFIXES)

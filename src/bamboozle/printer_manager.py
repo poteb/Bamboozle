@@ -2,22 +2,60 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import bambulabs_api as bl
 from fastapi import WebSocket
 
-from . import discovery, mqtt, protocol
+from . import discovery, mqtt, protocol, thumbnail
 from .camera import CameraStream
 from .config import _config_dir, save_config
 from .models import AppConfig, Filament, PrinterConfig, PrinterState
-from .thumbnail import fetch_thumbnail
 
 logger = logging.getLogger(__name__)
+
+
+async def _in_daemon_thread(fn, *args, **kwargs):
+    """Like asyncio.to_thread, but on a daemon thread of its own, so shutdown
+    never waits for it (asyncio joins the default executor's threads)."""
+    loop = asyncio.get_running_loop()
+    fut = loop.create_future()
+
+    def settle(result, exc):
+        if fut.done():  # the awaiting task was cancelled
+            return
+        if exc is None:
+            fut.set_result(result)
+        else:
+            fut.set_exception(exc)
+
+    def run():
+        try:
+            result, exc = fn(*args, **kwargs), None
+        except Exception as e:
+            result, exc = None, e
+        try:
+            loop.call_soon_threadsafe(settle, result, exc)
+        except RuntimeError:
+            pass  # the loop is closed: nobody is waiting any more
+
+    threading.Thread(target=run, name=getattr(fn, "__name__", "worker"), daemon=True).start()
+    return await fut
+
+
+class _Job(NamedTuple):
+    """What a state read saw of the current print job, for the thumbnail."""
+    key: str  # subtask_name, else gcode_file; "" when no job is known
+    gcode_file: str
+    subtask: str
+    gcode_state: str
+    internal: bool  # the file is on internal storage, out of FTPS reach
 
 
 def _backup_printer_config(cfg: PrinterConfig) -> Path:
@@ -49,6 +87,11 @@ class PrinterConnection:
     # ...and one this quiet is first asked for a full report (an idle printer
     # may push rarely).
     PROBE_SECONDS = 30.0
+    # After a failed thumbnail fetch, wait this long before trying again
+    # (doubling per failure, up to the max). A job whose 3MF isn't on the
+    # printer is not looked up again.
+    THUMB_RETRY_SECONDS = 60.0
+    THUMB_MAX_RETRY_SECONDS = 900.0
 
     def __init__(self, cfg: PrinterConfig):
         self.cfg = cfg
@@ -59,7 +102,14 @@ class PrinterConnection:
         self.camera_toggle_lock = asyncio.Lock()
         self.state = PrinterState(printer_id=cfg.id, name=cfg.name, sort=cfg.sort)
         self.thumbnail: bytes | None = None
-        self._thumb_fetched_for: str = ""  # gcode_file we fetched thumbnail for
+        self._thumb_key = ""  # job the thumbnail belongs to
+        self._thumb_job = ""  # job the lookup state below is for
+        self._thumb_retry_at = 0.0  # monotonic; math.inf = not on the printer
+        self._thumb_backoff = self.THUMB_RETRY_SECONDS
+        self._thumb_task: asyncio.Task | None = None
+        self._thumb_cancel = threading.Event()
+        # The manager's in-flight poll step for this printer (see _poll_all).
+        self.poll_step: asyncio.Task | None = None
         self._backoff = self.INITIAL_BACKOFF_SECONDS
         self._retry_at = 0.0  # monotonic time the next reconnect is due
         self._connected = False
@@ -181,6 +231,7 @@ class PrinterConnection:
 
     async def disconnect(self) -> None:
         """Stop the camera and end the MQTT session. Never waits on paho."""
+        self._cancel_thumbnail_fetch()
         try:
             await asyncio.to_thread(self.camera.stop)
         except Exception as e:
@@ -269,8 +320,14 @@ class PrinterConnection:
             self.state.timestamp = time.time()
             return self.state
         try:
-            state_data = await asyncio.to_thread(self._read_sync)
+            state_data, job = await asyncio.to_thread(self._read_sync)
             state_data.last_error = self._down_reason  # until the first report
+            self._update_thumbnail(job)
+            state_data.has_thumbnail = self.thumbnail is not None
+            state_data.thumbnail_key = self._thumb_key if self.thumbnail is not None else ""
+            state_data.thumbnail_unavailable = (
+                protocol.THUMBNAIL_INTERNAL_STORAGE if job.key and job.internal else ""
+            )
             self.state = state_data
             return state_data
         except Exception as e:
@@ -279,7 +336,7 @@ class PrinterConnection:
             self.state.timestamp = time.time()
             return self.state
 
-    def _read_sync(self) -> PrinterState:
+    def _read_sync(self) -> tuple[PrinterState, _Job]:
         p = self.printer
         try:
             gcode_state = p.get_state()
@@ -357,24 +414,17 @@ class PrinterConnection:
 
         online = gcode_str != "UNKNOWN" or nozzle_temp is not None
 
-        # Fetch thumbnail when a new print job is detected
         display_name = subtask or file_name
-        if display_name and display_name != self._thumb_fetched_for:
-            try:
-                thumb = fetch_thumbnail(
-                    self.cfg.ip, self.cfg.access_code, file_name
-                )
-                if thumb:
-                    self.thumbnail = thumb
-                    self._thumb_fetched_for = display_name
-                    logger.info("Fetched thumbnail for %s on %s", display_name, self.cfg.name)
-            except Exception as e:
-                logger.debug("Thumbnail fetch failed for %s: %s", self.cfg.name, e)
-        elif not display_name and gcode_str == "IDLE":
-            self.thumbnail = None
-            self._thumb_fetched_for = ""
+        job = _Job(
+            key=display_name,
+            gcode_file=file_name,
+            subtask=subtask,
+            gcode_state=gcode_str,
+            internal=protocol.file_on_internal_storage(report),
+        )
 
-        return PrinterState(
+        # The thumbnail fields are filled in by read_state.
+        state = PrinterState(
             printer_id=self.cfg.id,
             name=self.cfg.name,
             online=online,
@@ -394,14 +444,86 @@ class PrinterConnection:
             light_on=light_on,
             camera_enabled=self.cfg.camera_enabled,
             camera_available=self.camera.available,
-            has_thumbnail=self.thumbnail is not None,
-            thumbnail_key=self._thumb_fetched_for if self.thumbnail is not None else "",
             filaments=filaments,
             developer_mode=developer_mode,
             commands_blocked=commands_blocked,
             sort=self.cfg.sort,
             timestamp=time.time(),
         )
+        return state, job
+
+    # --- Thumbnail ----------------------------------------------------------
+
+    def _update_thumbnail(self, job: _Job) -> None:
+        """After each read: start a background fetch when the job needs one.
+
+        At most one fetch runs per printer (the printer allows few FTP
+        sessions). Runs on the event loop; the fetch itself never does.
+        """
+        if not job.key:
+            if job.gcode_state == "IDLE":
+                self._forget_thumbnail()
+            return
+        if job.key != self._thumb_job:
+            self._forget_thumbnail()  # not the previous job's picture
+            self._thumb_job = job.key
+        if (
+            job.internal
+            or self.thumbnail is not None
+            or (self._thumb_task is not None and not self._thumb_task.done())
+            or time.monotonic() < self._thumb_retry_at
+        ):
+            return
+        self._thumb_cancel = threading.Event()
+        self._thumb_task = asyncio.create_task(self._fetch_thumbnail(job, self._thumb_cancel))
+
+    def _forget_thumbnail(self) -> None:
+        self._cancel_thumbnail_fetch()
+        self.thumbnail = None
+        self._thumb_key = ""
+        self._thumb_job = ""
+        self._thumb_retry_at = 0.0
+        self._thumb_backoff = self.THUMB_RETRY_SECONDS
+
+    def _cancel_thumbnail_fetch(self) -> None:
+        self._thumb_cancel.set()
+        if self._thumb_task is not None and not self._thumb_task.done():
+            self._thumb_task.cancel()
+        self._thumb_task = None
+
+    async def _fetch_thumbnail(self, job: _Job, cancel: threading.Event) -> None:
+        try:
+            data = await _in_daemon_thread(
+                thumbnail.fetch_thumbnail,
+                self.cfg.ip, self.cfg.access_code, job.gcode_file, job.subtask,
+                cancel=cancel,
+            )
+        except asyncio.CancelledError:
+            cancel.set()
+            raise
+        except thumbnail.FetchCancelled:
+            return
+        except Exception as e:
+            if self._thumb_job == job.key:
+                self._thumb_retry_at = time.monotonic() + self._thumb_backoff
+                logger.info(
+                    "%s: thumbnail fetch failed (%s: %s); retrying in %.0fs",
+                    self.cfg.name, type(e).__name__, e, self._thumb_backoff,
+                )
+                self._thumb_backoff = min(self._thumb_backoff * 2, self.THUMB_MAX_RETRY_SECONDS)
+            return
+        if cancel.is_set() or self._thumb_job != job.key:
+            return
+        if data:
+            self.thumbnail = data
+            self._thumb_key = job.key
+            logger.info("Fetched thumbnail for %s on %s", job.key, self.cfg.name)
+        else:
+            self._thumb_retry_at = math.inf
+            logger.info(
+                "%s: no 3MF for %r on the printer's storage; no thumbnail for this job",
+                self.cfg.name, job.key,
+            )
 
     def _print_payload(self) -> dict | None:
         """The raw `print` object of the latest reports, or None before any."""
@@ -676,6 +798,11 @@ class PrinterManager:
     SHUTDOWN_TEARDOWN_SECONDS = 2.0
     # Requests that only ask for data; they work without Developer Mode.
     QUERY_ACTIONS = frozenset({"refresh"})
+    # How long the poll loop waits for one printer's poll step (health checks
+    # + state read) before broadcasting its last known state instead. The step
+    # keeps running; the next round waits on it again rather than starting
+    # another.
+    POLL_STEP_TIMEOUT_SECONDS = 2.0
 
     def __init__(
         self, config: AppConfig, discovery_port: int | None = discovery.SSDP_PORT
@@ -796,10 +923,11 @@ class PrinterManager:
         else:
             logger.warning("Printer %s failed to connect, will retry", conn.cfg.name)
 
-    def _spawn(self, coro) -> None:
+    def _spawn(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+        return task
 
     # --- IP auto-detect -----------------------------------------------------
 
@@ -927,26 +1055,7 @@ class PrinterManager:
         while True:
             try:
                 await asyncio.sleep(self._config.poll_interval)
-                states: dict[str, Any] = {}
-                for pid, conn in list(self._connections.items()):
-                    await conn.check_silence()
-                    # A session that went down (e.g. the printer's IP changed)
-                    # is reset so the reconnect re-probes the saved IP.
-                    if conn._connected and conn.is_offline():
-                        logger.warning(
-                            "%s: MQTT session to %s is down, reconnecting",
-                            conn.cfg.name, conn.cfg.ip,
-                        )
-                        await conn.reset_session()
-                    # Reconnect in the background so an unreachable printer
-                    # can't stall updates for the rest.
-                    if conn.needs_reconnect():
-                        logger.info("Attempting reconnect for %s", conn.cfg.name)
-                        self._spawn(self._connect_printer(pid))
-
-                    state = await conn.read_state()
-                    state_dict = state.model_dump(mode="json")
-                    states[pid] = state_dict
+                states = await self._poll_all()
 
                 if self._ws_clients:
                     msg = {"type": "update", "printers": states}
@@ -957,6 +1066,48 @@ class PrinterManager:
                 raise
             except Exception as e:
                 logger.error("Poll loop error: %s", e)
+
+    async def _poll_all(self) -> dict[str, Any]:
+        """Poll every printer at once; a slow one can't hold up the rest."""
+        conns = list(self._connections.items())
+        await asyncio.gather(*(self._await_poll_step(pid, conn) for pid, conn in conns))
+        return {pid: conn.state.model_dump(mode="json") for pid, conn in conns}
+
+    async def _await_poll_step(self, pid: str, conn: PrinterConnection) -> None:
+        step = conn.poll_step
+        if step is None or step.done():
+            step = conn.poll_step = self._spawn(self._poll_step(pid, conn))
+        try:
+            await asyncio.wait_for(asyncio.shield(step), self.POLL_STEP_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            pass  # still running; this round shows the last known state
+
+    async def _poll_step(self, pid: str, conn: PrinterConnection) -> None:
+        started = time.monotonic()
+        try:
+            await conn.check_silence()
+            # A session that went down (e.g. the printer's IP changed)
+            # is reset so the reconnect re-probes the saved IP.
+            if conn._connected and conn.is_offline():
+                logger.warning(
+                    "%s: MQTT session to %s is down, reconnecting",
+                    conn.cfg.name, conn.cfg.ip,
+                )
+                await conn.reset_session()
+            # Reconnect in the background so an unreachable printer
+            # can't stall its own updates either.
+            if conn.needs_reconnect():
+                logger.info("Attempting reconnect for %s", conn.cfg.name)
+                self._spawn(self._connect_printer(pid))
+            await conn.read_state()
+        except Exception as e:
+            logger.error("Poll error for %s: %s", conn.cfg.name, e)
+        took = time.monotonic() - started
+        if took > self.POLL_STEP_TIMEOUT_SECONDS:
+            logger.warning(
+                "%s: polling took %.1fs; its last known state was shown meanwhile",
+                conn.cfg.name, took,
+            )
 
     async def _broadcast(self, message: dict) -> None:
         dead: list[WebSocket] = []

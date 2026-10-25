@@ -357,6 +357,7 @@ class BamboozleApp {
 
                 jobSection.innerHTML = `
                     <div class="file-name">${this.esc(s.file_name || 'Unknown file')}</div>
+                    ${this._thumbnailNoteHtml(s)}
                     <div class="progress-row">
                         <progress value="${s.progress}" max="100"></progress>
                         <span class="progress-pct">${s.progress}%</span>
@@ -732,6 +733,7 @@ class BamboozleApp {
                 <div class="card-notice" role="status" title="${notice ? this.esc(notice.title) : ''}">${notice ? this.esc(notice.text) : ''}</div>
                 <div class="job-section">${hasJob ? `
                     <div class="file-name">${this.esc(s.file_name || 'Unknown file')}</div>
+                    ${this._thumbnailNoteHtml(s)}
                     <div class="progress-row">
                         <progress value="${s.progress}" max="100"></progress>
                         <span class="progress-pct">${s.progress}%</span>
@@ -764,6 +766,22 @@ class BamboozleApp {
                 <div class="actions">${actionsHtml}</div>
             </div>
         `;
+    }
+
+    // Why the job card has no preview picture, or ''.
+    thumbnailNote(s) {
+        if (s.camera_enabled || s.has_thumbnail) return '';
+        if (s.thumbnail_unavailable === 'internal_storage') {
+            return 'No preview: the print file is on the printer\'s internal storage. '
+                + 'To get previews, insert an SD card or USB drive and enable '
+                + '"Store sent files on external storage" in Bambu Studio';
+        }
+        return '';
+    }
+
+    _thumbnailNoteHtml(s) {
+        const note = this.thumbnailNote(s);
+        return note ? `<div class="thumbnail-note">${this.esc(note)}</div>` : '';
     }
 
     // One line of "why isn't this working" on the card, or null.

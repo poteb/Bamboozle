@@ -298,6 +298,12 @@
     text-overflow: ellipsis;
 }
 
+.thumbnail-note {
+    font-size: 0.75rem;
+    opacity: 0.65;
+    margin-top: 0.15rem;
+}
+
 /* Progress */
 .progress-row {
     display: flex;
