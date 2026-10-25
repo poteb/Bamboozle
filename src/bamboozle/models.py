@@ -16,6 +16,9 @@ class PrinterConfig(BaseModel):
     camera_port: int = 6000  # 6000 for A1/P1/P1S, 322 for X1/H2C/H2D/P2
     camera_enabled: bool = False
     sort: int = 0
+    # SSDP DevModel code (e.g. "N7" = P2S, see discovery.model_info); "" until
+    # the printer is heard announcing. Picks the camera's ffmpeg profile.
+    model: str = ""
 
 
 class AppConfig(BaseModel):

@@ -12,18 +12,7 @@ import pytest
 
 from bamboozle import camera
 from bamboozle.camera import CameraStream, raw_frames
-
-JPEG_A = b"\xff\xd8" + b"A" * 50 + b"\xff\xd9"
-JPEG_B = b"\xff\xd8" + b"B" * 50 + b"\xff\xd9"
-
-
-def wait_until(cond, timeout=3.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if cond():
-            return True
-        time.sleep(0.01)
-    return False
+from fakes import JPEG_A, JPEG_B, FakeFfmpeg, wait_until
 
 
 # -- reconnect policy ---------------------------------------------------------
@@ -117,67 +106,6 @@ def test_frame_older_than_max_age_is_not_served(monkeypatch):
 
 
 # -- frozen-frame watchdog (RTSP / ffmpeg) -------------------------------------
-
-
-class FakeFfmpeg:
-    """A Popen stand-in whose stdout plays `frames` (cycled) until killed.
-
-    `frames=[]` models an ffmpeg that has stalled and writes nothing.
-    """
-
-    def __init__(self, frames, returncode=None, stderr=b""):
-        self.frames = frames
-        self.returncode = returncode
-        self.killed = threading.Event()
-        self.stdout = self
-        self.stderr = io.BytesIO(stderr)
-        self._i = 0
-
-    def close(self):
-        pass
-
-    def read(self, n):
-        if not self.frames:
-            self.killed.wait()
-            return b""
-        if self.killed.wait(0.02):
-            return b""
-        frame = self.frames[self._i % len(self.frames)]
-        self._i += 1
-        return frame
-
-    def poll(self):
-        return self.returncode
-
-    def kill(self):
-        self.returncode = -9
-        self.killed.set()
-
-    terminate = kill
-
-    def wait(self, timeout=None):
-        return self.returncode
-
-
-@pytest.fixture
-def ffmpeg(monkeypatch):
-    """Queue FakeFfmpeg processes; each Popen call takes the next one."""
-    monkeypatch.setattr(camera, "_find_ffmpeg", lambda: "ffmpeg")
-    monkeypatch.setattr(CameraStream, "FFMPEG_STARTUP_SECONDS", 0)
-    monkeypatch.setattr(CameraStream, "WATCH_INTERVAL_SECONDS", 0.02)
-    monkeypatch.setattr(CameraStream, "FROZEN_SECONDS", 0.5)
-    monkeypatch.setattr(CameraStream, "RESPAWN_SECONDS", 0.05)
-    monkeypatch.setattr(CameraStream, "HEALTHY_SESSION_SECONDS", 0.1)
-    queue = []
-    spawned = []
-
-    def popen(cmd, **kwargs):
-        proc = queue.pop(0) if queue else FakeFfmpeg([])
-        spawned.append(proc)
-        return proc
-
-    monkeypatch.setattr(camera.subprocess, "Popen", popen)
-    yield queue, spawned
 
 
 @pytest.fixture

@@ -66,7 +66,8 @@ def parse_announcement(data: bytes) -> Announcement | None:
 # --- Model codes -------------------------------------------------------------
 #
 # DevModel code -> (friendly name, camera port). C12, N2S, O1C2 and N7 are
-# confirmed from live printers; the rest come from Bambu Studio profiles.
+# confirmed from live printers; O1C (an H2C variant) is from BamBuddy's model
+# table; the rest come from Bambu Studio profiles.
 # Anything missing is treated as unknown.
 
 _MODELS: dict[str, tuple[str, int]] = {
@@ -77,6 +78,7 @@ _MODELS: dict[str, tuple[str, int]] = {
     "BL-P002": ("X1", 322),
     "BL-P001": ("X1C", 322),
     "C13": ("X1E", 322),
+    "O1C": ("H2C", 322),
     "O1C2": ("H2C", 322),
     "O1D": ("H2D", 322),
     "N7": ("P2S", 322),
