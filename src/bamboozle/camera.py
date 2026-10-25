@@ -202,8 +202,10 @@ class CameraStream:
     hammered. A session that delivered no frames also clears the picture.
 
     RTSP sessions use the ffmpeg profile for `model` (the SSDP DevModel code,
-    which may be learned while streaming). After a LOW_LATENCY session that
-    was unhealthy or froze, the run switches to TOLERANT until the next start().
+    which may be learned while streaming). Until a LOW_LATENCY session has
+    shown a moving picture, one that was unhealthy or froze switches the run
+    to TOLERANT until the next start(). Once LOW_LATENCY has worked, routine
+    drops and still scenes keep it.
     """
 
     HEALTHY_SESSION_SECONDS = 10.0
@@ -225,7 +227,10 @@ class CameraStream:
         self._access_code = access_code
         self._port = camera_port
         self.model = model
-        self._fallback = False  # use TOLERANT for the rest of this run
+        # Per run, set in the capture thread: use TOLERANT from now on, and
+        # whether LOW_LATENCY has delivered a moving picture.
+        self._fallback = False
+        self._low_latency_works = False
         self._frame: bytes | None = None
         self._frame_at = 0.0
         self._lock = threading.Lock()
@@ -242,6 +247,8 @@ class CameraStream:
         self._session_first_at = 0.0
         self._session_last_at = 0.0
         self._session_froze = False  # the watchdog ended the session
+        self._session_pictures = 0  # changes of picture this session
+        self._session_last_frame: bytes | None = None
         self._frozen_on: bytes | None = None
 
     @property
@@ -256,7 +263,6 @@ class CameraStream:
         # one client. It's no longer self._thread, so it won't carry on.
         previous = self._thread if self._thread and self._thread.is_alive() else None
         self._running = True
-        self._fallback = False
         self._stopped = threading.Event()
         self._thread = threading.Thread(target=self._capture_loop, args=(previous,), daemon=True)
         self._thread.start()
@@ -297,6 +303,9 @@ class CameraStream:
             self._frame_at = now
         if not self._session_frames:
             self._session_first_at = now
+        if frame != self._session_last_frame:
+            self._session_pictures += 1
+            self._session_last_frame = frame
         self._session_frames += 1
         self._session_last_at = now
 
@@ -328,10 +337,15 @@ class CameraStream:
     def _capture_loop(self, previous: threading.Thread | None = None) -> None:
         if previous is not None:
             previous.join()
+        self._fallback = False
+        self._low_latency_works = False
         backoff = self.BACKOFF_MIN_SECONDS
         while self._active():
             self._session_frames = 0
             self._session_froze = False
+            self._session_pictures = 0
+            self._session_last_frame = None
+            profile = self._session_profile()
             try:
                 self._capture_session()
             except Exception as e:
@@ -341,13 +355,11 @@ class CameraStream:
                 break
 
             healthy = self._session_was_healthy()
-            if (
-                self._port == 322
-                and (not healthy or self._session_froze)
-                and self._session_profile() == LOW_LATENCY
-            ):
-                logger.info("Camera %s: switching to the tolerant ffmpeg profile", self._ip)
-                self._fallback = True
+            if self._port == 322 and profile == LOW_LATENCY:
+                self._low_latency_works |= self._session_pictures >= 2
+                if not self._low_latency_works and (not healthy or self._session_froze):
+                    logger.info("Camera %s: switching to the tolerant ffmpeg profile", self._ip)
+                    self._fallback = True
             if healthy:
                 backoff = self.BACKOFF_MIN_SECONDS
                 delay = self.RESPAWN_SECONDS

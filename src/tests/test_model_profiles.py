@@ -108,7 +108,7 @@ def test_p2s_stream_uses_the_tolerant_profile_from_the_start(commands):
 def test_low_latency_start_that_fails_falls_back_to_the_tolerant_profile(commands):
     """probesize 32 doesn't lock on every firmware, and an unknown model may be a P2S."""
     queue, cmds = commands
-    queue.append(FakeFfmpeg([JPEG_A]))  # one frame, then frozen: unhealthy session
+    queue.append(FakeFfmpeg([JPEG_A]))  # the first picture, repeated until the watchdog trips
     cam = CameraStream(P2S_IP, "x", 322)
     cam.RESPAWN_SECONDS = cam.BACKOFF_MIN_SECONDS = 0.05
     cam.start()
@@ -141,6 +141,21 @@ def test_healthy_low_latency_session_keeps_the_profile(commands):
     try:
         assert wait_until(lambda: cam._session_was_healthy())
         first.kill()  # routine session drop
+        assert wait_until(lambda: len(cmds) >= 2)
+    finally:
+        cam.stop()
+    assert [_profile_of(c) for c in cmds[:2]] == [camera.LOW_LATENCY, camera.LOW_LATENCY]
+
+
+def test_low_latency_that_worked_survives_a_freeze(commands):
+    """A dead upstream or a still scene after a moving picture isn't a profile problem."""
+    queue, cmds = commands
+    first = FakeFfmpeg([JPEG_A, JPEG_B] + [JPEG_B] * 1000)
+    queue.extend([first, FakeFfmpeg([JPEG_A, JPEG_B])])
+    cam = CameraStream("192.168.0.101", "x", 322, model="O1C2")
+    cam.start()
+    try:
+        assert first.killed.wait(3), "watchdog did not trip"
         assert wait_until(lambda: len(cmds) >= 2)
     finally:
         cam.stop()

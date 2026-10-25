@@ -969,7 +969,7 @@ class PrinterManager:
         )
         conn.cfg.model = ann.model
         conn.camera.model = ann.model
-        for p in self._config.printers:
+        for p in self._config.printers:  # conn.cfg is normally this entry already
             if p.id == conn.cfg.id:
                 p.model = ann.model
         save_config(self._config)
