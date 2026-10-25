@@ -125,6 +125,7 @@ const ICO = {
     pause:      () => `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`,
     play:       () => `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>`,
     stop:       () => `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/></svg>`,
+    refresh:    (c='currentColor') => `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>`,
 };
 
 class BamboozleApp {
@@ -448,6 +449,9 @@ class BamboozleApp {
             lightBtn.innerHTML = ICO.light(s.light_on ? '#ffc107' : '#888');
             lightBtn.setAttribute('onclick', `app.sendCommand('${id}','${s.light_on ? 'light_off' : 'light_on'}')`);
         }
+
+        const refreshBtn = card.querySelector('.refresh-btn');
+        if (refreshBtn) refreshBtn.style.display = s.online ? '' : 'none';
     }
 
     _cameraStreamHtml(id) {
@@ -712,6 +716,7 @@ class BamboozleApp {
         }
 
         const lightBtn = `<button class="outline small icon-btn light-btn" onclick="app.sendCommand('${id}','${s.light_on ? 'light_off' : 'light_on'}')" title="Toggle light" ${s.online ? '' : 'style="display:none"'}>${ICO.light(s.light_on ? '#ffc107' : '#888')}</button>`;
+        const refreshBtn = `<button class="outline small icon-btn refresh-btn" onclick="app.sendCommand('${id}','refresh')" title="Refresh: ask the printer for a full status report" aria-label="Refresh" ${s.online ? '' : 'style="display:none"'}>${ICO.refresh('#888')}</button>`;
 
         return `
             <header>
@@ -720,6 +725,7 @@ class BamboozleApp {
                 <span class="status-label">${statusLabel}</span>
                 ${cameraToggleBtn}
                 ${lightBtn}
+                ${refreshBtn}
             </header>
             ${cameraHtml}
             <div class="card-bottom">
@@ -768,6 +774,17 @@ class BamboozleApp {
                     + 'changes it): update it in Settings',
                 title: 'The printer refused the login.',
             };
+        }
+        if (!s.online && s.last_error === 'no_reports') {
+            return {
+                text: 'Connected, but the printer sends no data: check the serial number '
+                    + 'in Settings (it is case-sensitive)',
+                title: 'The login worked, but no report arrived on the serial\'s topic.',
+            };
+        }
+        if (!s.online && s.last_error === 'stale') {
+            const text = 'No data from the printer for over a minute: reconnecting';
+            return { text, title: text };
         }
         if (s.online && s.commands_blocked) {
             const text = 'Printer is refusing control commands: enable LAN Only + '
@@ -863,6 +880,7 @@ class BamboozleApp {
             light_on: ['light', { on: true }],
             light_off: ['light', { on: false }],
             set_speed: ['speed', { level: params.level }],
+            refresh: ['refresh'],
         }[action];
         if (!route) {
             this.showToast('Not connected — reconnecting', 'error');

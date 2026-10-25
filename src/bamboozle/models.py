@@ -62,8 +62,9 @@ class PrinterState(BaseModel):
     developer_mode: bool | None = None
     # The printer is known to drop control commands (see protocol.py).
     commands_blocked: bool = False
-    # Why the connection is down, when known (protocol.AUTH_REJECTED).
-    last_error: Literal["", "auth_rejected"] = ""
+    # Why the connection is down, when known (protocol.AUTH_REJECTED,
+    # NO_REPORTS, STALE).
+    last_error: Literal["", "auth_rejected", "no_reports", "stale"] = ""
     sort: int = 0
     timestamp: float = Field(default_factory=time.time)
 
