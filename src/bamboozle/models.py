@@ -61,6 +61,20 @@ class AmsUnit(BaseModel):
     temp: float | None = None  # degrees C; None without a sensor
 
 
+class PrinterError(BaseModel):
+    """A health (HMS) message or print error the printer reports (see hms.py)."""
+    kind: Literal["hms", "print_error"]
+    # As the printer screen shows it: "0701_2000_0002_0001" (HMS), "0300_8003".
+    code: str
+    severity: Literal["", "fatal", "serious", "common", "info"] = ""
+    module: str = ""  # e.g. "AMS 2", "Toolhead"; "" when unknown
+    description: str = ""  # our own words, for the few codes we understand
+    url: str  # Bambu's wiki for the code (their text isn't bundled: licence)
+    # Likely why the job is paused / failed. Otherwise a lingering message:
+    # the printer keeps them until they're acknowledged on it.
+    active: bool = False
+
+
 class PrinterState(BaseModel):
     printer_id: str
     name: str
@@ -102,7 +116,8 @@ class PrinterState(BaseModel):
     # (protocol.THUMBNAIL_INTERNAL_STORAGE: the file isn't on the FTPS share).
     thumbnail_unavailable: Literal["", "internal_storage"] = ""
     filaments: list[Filament] = []
-    error_code: int = 0
+    # HMS messages and the print error; active ones first (see hms.py).
+    errors: list[PrinterError] = []
     # None when the printer doesn't report it (A1 / P1 send no `fun` field).
     # Informational only: some print controls may be ignored while it's off
     # (see protocol.py); commands are never failed because of it.

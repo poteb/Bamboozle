@@ -337,6 +337,72 @@
     margin-top: 0.25rem;
 }
 
+/* HMS messages / print error (hms.py). Stays rendered while empty, like the
+   card notice, so its role="status" region announces new errors. Active
+   errors (why the job is paused or failed) are a red block; lingering ones
+   sit in a quiet disclosure like the Developer Mode hint. */
+.card-errors-active {
+    margin-top: 0.5rem;
+    padding: 0.35rem 0.6rem;
+    border-left: 3px solid var(--status-error);
+    border-radius: 4px;
+    background: rgba(244, 67, 54, 0.12);
+    font-size: 0.85rem;
+}
+
+.card-errors-lingering {
+    margin: 0.35rem 0 0;
+    font-size: 0.75rem;
+    opacity: 0.65;
+}
+
+.card-errors-lingering[open],
+.card-errors-lingering:focus-within {
+    opacity: 1;
+}
+
+/* Undo Pico's accordion look: a plain disclosure marker before the text. */
+.card-errors-lingering > summary,
+.card-errors-lingering[open] > summary {
+    display: list-item;
+    list-style: disclosure-closed inside;
+    cursor: pointer;
+    color: inherit;
+    line-height: inherit;
+    margin: 0;
+}
+
+.card-errors-lingering[open] > summary {
+    list-style-type: disclosure-open;
+}
+
+.card-errors-lingering > summary::after {
+    display: none;
+}
+
+.card-errors-lingering > summary:focus-visible {
+    outline: 2px solid var(--pico-primary);
+    outline-offset: 2px;
+}
+
+.card-errors-lingering .error-line {
+    margin-top: 0.2rem;
+}
+
+.error-line + .error-line {
+    margin-top: 0.2rem;
+}
+
+.error-line a {
+    color: inherit;
+    font-family: var(--pico-font-family-monospace, monospace);
+    white-space: nowrap;
+}
+
+.error-desc {
+    opacity: 0.8;
+}
+
 /* File name */
 .file-name {
     font-size: 0.9rem;

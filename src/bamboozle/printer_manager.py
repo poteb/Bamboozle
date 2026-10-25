@@ -13,7 +13,7 @@ from typing import Any, NamedTuple
 import bambulabs_api as bl
 from fastapi import WebSocket
 
-from . import discovery, mqtt, protocol, report, thumbnail
+from . import discovery, hms, mqtt, protocol, report, thumbnail
 from .camera import CameraStream
 from .config import _config_dir, save_config
 from .models import AppConfig, Filament, PrinterConfig, PrinterState
@@ -416,6 +416,11 @@ class PrinterConnection:
         except Exception as e:  # the decoders are defensive; never lose the read
             logger.warning("Decoding the report from %s failed: %s", self.cfg.name, e)
             status = {}
+        try:
+            errors = hms.printer_errors(print_payload)
+        except Exception as e:
+            logger.warning("Decoding the errors from %s failed: %s", self.cfg.name, e)
+            errors = []
 
         online = gcode_str != "UNKNOWN" or status.get("nozzle_temp") is not None
 
@@ -445,6 +450,7 @@ class PrinterConnection:
             camera_available=self.camera.available,
             filaments=filaments,
             developer_mode=developer_mode,
+            errors=errors,
             sort=self.cfg.sort,
             timestamp=time.time(),
             **status,

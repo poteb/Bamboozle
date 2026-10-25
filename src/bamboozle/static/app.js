@@ -6,6 +6,11 @@ const STATUS_PRIORITY = {
     'RUNNING': 0, 'PAUSE': 1, 'PREPARE': 2, 'FINISH': 3, 'FAILED': 4, 'IDLE': 5, 'UNKNOWN': 6,
 };
 
+// HMS / print error levels (hms.py): fatal stops the job, serious pauses it.
+const ERROR_SEVERITY_LABELS = {
+    fatal: 'Error', serious: 'Warning', common: 'Notice', info: 'Info',
+};
+
 // Bambu Lab filament color catalog — hex -> human-readable name.
 // PLA Basic and PLA Matte sourced from Bambu Lab's official color PDFs.
 // PETG HF / ABS / Silks etc. are best-effort from BambuStudio profiles and may
@@ -334,6 +339,10 @@ class BamboozleApp {
         // Update notice line (refused access code / Developer Mode off ...)
         const noticeEl = card.querySelector('.card-notice');
         if (noticeEl) this.applyNotice(noticeEl, this.cardNotice(s));
+
+        // Update HMS messages / print error
+        const errorsEl = card.querySelector('.card-errors');
+        if (errorsEl) this.applyErrors(errorsEl, s);
 
         const isPrinting = s.gcode_state === 'RUNNING';
         const isPaused = s.gcode_state === 'PAUSE';
@@ -700,6 +709,7 @@ class BamboozleApp {
             ${cameraHtml}
             <div class="card-bottom">
                 <div class="card-notice${notice && notice.quiet ? ' quiet' : ''}" role="status" title="${notice && !notice.quiet ? this.esc(notice.title) : ''}" data-key="${this.esc(this._noticeKey(notice))}">${this.noticeHtml(notice)}</div>
+                <div class="card-errors" role="status" data-key="${this.esc(this._errorsKey(s))}">${this.errorsHtml(s)}</div>
                 <div class="job-section">${this.jobSectionHtml(s)}</div>
                 <div class="temps-row">${this.tempsRowHtml(s)}</div>
                 ${s.online && s.print_speed ? `
@@ -895,6 +905,58 @@ class BamboozleApp {
         return `<details><summary>${this.esc(notice.text)}</summary>`
             // aria-live off: opening it isn't a status change to announce.
             + `<div class="card-notice-detail" aria-live="off">${this.esc(notice.title)}</div></details>`;
+    }
+
+    // One HMS message / print error: "Warning · AMS 2 · <code linked to Bambu's
+    // wiki>", then our description when we have one. The text is Bambu's
+    // (not bundled), so the code links to it.
+    errorLineHtml(e) {
+        const label = ERROR_SEVERITY_LABELS[e.severity] || '';
+        const code = this.esc(e.code);
+        const codeHtml = typeof e.url === 'string' && e.url.startsWith('https://')
+            ? `<a href="${this.esc(e.url)}" target="_blank" rel="noopener noreferrer" `
+                + `title="Look up this code on Bambu Lab's wiki">${code} ↗</a>`
+            : code;
+        const parts = [label, e.module].filter(Boolean).map((p) => this.esc(p));
+        parts.push(codeHtml);
+        const desc = e.description ? `<div class="error-desc">${this.esc(e.description)}</div>` : '';
+        return `<div class="error-line">${parts.join(' · ')}${desc}</div>`;
+    }
+
+    // Inner HTML of the card's error area. Active errors (why the job is
+    // paused or failed) are a prominent block; the rest are lingering messages
+    // the printer keeps until they're acknowledged on it, so they sit in a
+    // quiet collapsed line instead of looking like a current fault.
+    errorsHtml(s) {
+        if (!s.online || !Array.isArray(s.errors) || !s.errors.length) return '';
+        const active = s.errors.filter((e) => e.active);
+        const lingering = s.errors.filter((e) => !e.active);
+        let html = '';
+        if (active.length) {
+            html += `<div class="card-errors-active">${active.map((e) => this.errorLineHtml(e)).join('')}</div>`;
+        }
+        if (lingering.length) {
+            const n = lingering.length;
+            const summary = `${n}${active.length ? ' more' : ''} printer message${n === 1 ? '' : 's'}`;
+            html += `<details class="card-errors-lingering"><summary>${summary}</summary>`
+                + `${lingering.map((e) => this.errorLineHtml(e)).join('')}</details>`;
+        }
+        return html;
+    }
+
+    _errorsKey(s) {
+        if (!s.online || !Array.isArray(s.errors)) return '';
+        return s.errors.map((e) => `${e.active ? 'a' : 'l'}:${e.code}:${e.severity}:${e.module}:${e.description}`).join('|');
+    }
+
+    // Update the error area in place, only when the errors change, so an open
+    // list of lingering messages stays open across updates.
+    applyErrors(el, s) {
+        const key = this._errorsKey(s);
+        if (el.dataset.key !== key) {
+            el.dataset.key = key;
+            el.innerHTML = this.errorsHtml(s);
+        }
     }
 
     _noticeKey(notice) {
