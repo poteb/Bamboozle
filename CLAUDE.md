@@ -19,6 +19,8 @@ py -m bamboozle.main           # or: python -m bamboozle.main
 
 Tests: `pip install -r src/requirements-dev.txt`, then run `python -m pytest` from `src/` (`src/pytest.ini` sets `pythonpath = .`). `tests/conftest.py` points `LOCALAPPDATA` at a temp dir so tests never touch the real config. Network adapters (`discovery.tcp_reachable`, `discovery.fetch_cert_common_name`) are monkeypatched in tests; `PrinterManager(..., discovery_port=None)` disables the UDP listener.
 
+Captured MQTT reports from the user's A1 / P1S / H2C / P2S live in `src/tests/fixtures/reports/*.jsonl.gz` (masked; format and contents in its README), loaded with `tests/report_fixtures.py`. Re-capture with `python -m tools.capture_reports capture` then `mask` from `src/`: it sends only a standalone `pushall` and `get_version` per printer and writes the raw capture outside the repo.
+
 JS tests: `node --test "src/tests/js/*.test.mjs"` from the repo root (Node 22+, no npm deps). They load `static/app.js` into a `node:vm` context with stubbed `document` / `fetch` / `WebSocket` / `setTimeout` and stub out `render()`, so they cover state logic, not card DOM.
 
 Working directory matters: `main.py` mounts static files with the relative path `bamboozle/static`, so the server must be launched from `src/`.
