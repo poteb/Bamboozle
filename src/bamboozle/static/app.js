@@ -283,7 +283,7 @@ class BamboozleApp {
             }
             this.render();
         } else if (msg.type === 'command_result') {
-            this.showToast(msg.message, msg.success ? 'success' : 'error');
+            this.showToast(msg.message, this.commandToastType(msg));
         } else if (msg.type === 'notice') {
             this.showToast(msg.message, msg.level || 'info');
         }
@@ -1095,10 +1095,17 @@ class BamboozleApp {
             }
             const json = await res.json();
             this.showToast(json.message || (json.success ? 'Done' : 'Command failed'),
-                json.success ? 'success' : 'error');
+                this.commandToastType(json));
         } catch {
             this.showToast('Command failed: server unreachable', 'error');
         }
+    }
+
+    // A command the printer took (success), one it was sent but didn't show
+    // within the wait (info: "sent, but not confirmed"), or one that failed.
+    commandToastType(result) {
+        if (!result.success) return 'error';
+        return result.confirmed === false ? 'info' : 'success';
     }
 
     showToast(message, type = 'info') {

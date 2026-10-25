@@ -2,7 +2,7 @@
 import asyncio
 import logging
 
-from bamboozle import discovery
+from bamboozle import discovery, mqtt
 from bamboozle.models import PrinterAddRequest, PrinterConfig
 from bamboozle.printer_manager import PrinterConnection
 from bamboozle.routers.api import test_connection as api_test_connection
@@ -57,6 +57,7 @@ def test_unreachable_printer_does_not_stall_dashboard_updates(monkeypatch):
         return False
 
     monkeypatch.setattr(discovery, "tcp_reachable", slow_unreachable)
+    monkeypatch.setattr(PrinterManager, "HEARTBEAT_SECONDS", 0)  # broadcast every round
 
     async def scenario():
         cfg = PrinterConfig(name="P1S", ip=IP, access_code="x", serial="01P00C511100150")
@@ -93,8 +94,7 @@ def test_unreachable_printer_is_retried_with_backoff(monkeypatch):
 
 def test_session_lost_mid_run_is_reported_unreachable_on_reconnect(monkeypatch, caplog):
     """IP changed while running: MQTT drops, the reconnect hits the TCP pre-check."""
-    import bambulabs_api as bl
-
+    
     from bamboozle.models import AppConfig
     from bamboozle.printer_manager import PrinterManager
 
@@ -102,7 +102,7 @@ def test_session_lost_mid_run_is_reported_unreachable_on_reconnect(monkeypatch, 
     monkeypatch.setattr(
         discovery, "tcp_reachable", lambda ip, port=8883, timeout=3.0: reachable["value"])
     # MQTT "starts" but the session never comes up (the printer has moved away).
-    monkeypatch.setattr(bl.Printer, "mqtt_start", lambda self: None)
+    monkeypatch.setattr(mqtt.BambuClient, "start", lambda self: None)
     monkeypatch.setattr(PrinterConnection, "MQTT_GRACE_SECONDS", 0.1)
     monkeypatch.setattr(PrinterConnection, "MQTT_SETTLE_SECONDS", 0)
     monkeypatch.setattr(PrinterConnection, "INITIAL_BACKOFF_SECONDS", 0.01)

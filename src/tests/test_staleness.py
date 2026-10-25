@@ -3,12 +3,12 @@
 import asyncio
 import logging
 
-import bambulabs_api as bl
 import pytest
 
 from bamboozle import discovery, mqtt, protocol
 from bamboozle.models import AppConfig, PrinterConfig
 from bamboozle.printer_manager import PrinterConnection, PrinterManager
+from fakes import deliver
 
 STALE = 0.2
 PROBE = 0.1
@@ -18,8 +18,8 @@ PROBE = 0.1
 def lan(monkeypatch):
     """Reachable printer whose MQTT socket is up, but that sends nothing unless told."""
     monkeypatch.setattr(discovery, "tcp_reachable", lambda ip, port=8883, timeout=3.0: True)
-    monkeypatch.setattr(bl.Printer, "mqtt_start", lambda self: None)
-    monkeypatch.setattr(bl.PrinterMQTTClient, "is_connected", lambda self: True)
+    monkeypatch.setattr(mqtt.BambuClient, "start", lambda self: None)
+    monkeypatch.setattr(mqtt.BambuClient, "is_connected", lambda self: True)
     monkeypatch.setattr(PrinterConnection, "MQTT_SETTLE_SECONDS", 0)
     monkeypatch.setattr(PrinterConnection, "STALE_SECONDS", STALE)
     monkeypatch.setattr(PrinterConnection, "PROBE_SECONDS", PROBE)
@@ -29,10 +29,8 @@ def lan(monkeypatch):
 
 
 def report(conn, payload=None):
-    """Deliver a report the way the library's paho callback does."""
-    mc = conn.printer.mqtt_client
-    mc.manual_update(payload or {"print": {"gcode_state": "IDLE", "nozzle_temper": 25}})
-    mc.on_message_handler(mc, None, None, None)
+    """Deliver a report the way paho's network thread does."""
+    deliver(conn.client, payload or {"print": {"gcode_state": "IDLE", "nozzle_temper": 25}})
 
 
 def _conn():
@@ -175,7 +173,7 @@ def test_silent_session_does_not_reset_the_reconnect_backoff(lan):
 def test_poll_loop_reconnects_a_silent_printer(lan, monkeypatch):
     monkeypatch.setattr(PrinterConnection, "INITIAL_BACKOFF_SECONDS", 0.01)
     starts = []
-    monkeypatch.setattr(bl.Printer, "mqtt_start", lambda self: starts.append(self))
+    monkeypatch.setattr(mqtt.BambuClient, "start", lambda self: starts.append(self))
 
     async def scenario():
         cfg = PrinterConfig(id="p1s", name="P1S", ip="192.168.0.103", access_code="x",

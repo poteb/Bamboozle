@@ -325,20 +325,43 @@ def test_the_card_state_carries_bambus_text(monkeypatch, http):
     catalog = refreshed([H2C_SERIAL])
     monkeypatch.setattr(hms_catalog, "CATALOG", catalog)
 
-    class DumpOnly:
-        def mqtt_dump(self):
-            return {"print": {"gcode_state": "IDLE", "nozzle_temper": 25, "hms": [CAMERA_GONE]}}
-
-        def __getattr__(self, name):
-            def fail(*a, **k):
-                raise RuntimeError("not available")
-            return fail
-
     conn = PrinterConnection(PrinterConfig(name="H2C", ip="10.0.0.3", access_code="x",
                                            serial=H2C_SERIAL, model="O1C2"))
-    conn.printer = DumpOnly()
-    state, _ = conn._read_sync()
+    conn.report.print = {"gcode_state": "IDLE", "nozzle_temper": 25, "hms": [CAMERA_GONE]}
+    conn._connected = True
+    state = asyncio.run(conn.read_state())
     assert [e.description for e in state.errors] == ["H2C camera text."]
+
+
+def test_a_newly_loaded_catalogue_pushes_the_cards_again(monkeypatch, http):
+    """Event-driven pushes only re-read a printer when something changes, so
+    a catalogue that loads later says so."""
+    catalog = hms_catalog.HmsCatalog()
+    calls = []
+
+    async def scenario():
+        catalog.start(lambda: [H2C_SERIAL], on_change=lambda: calls.append(catalog.generation))
+        for _ in range(200):
+            if calls:
+                break
+            await asyncio.sleep(0.01)
+        await catalog.stop()
+
+    asyncio.run(scenario())
+    assert calls and calls[0] >= 1
+
+
+def test_a_refresh_round_that_loads_nothing_new_is_quiet(monkeypatch):
+    catalog = hms_catalog.HmsCatalog()
+    calls = []
+
+    async def scenario():  # network disabled (conftest): nothing loads
+        catalog.start(lambda: [], on_change=lambda: calls.append(1))
+        await asyncio.sleep(0.1)
+        await catalog.stop()
+
+    asyncio.run(scenario())
+    assert calls == []
 
 
 def test_the_manager_refreshes_the_catalogue_for_its_printers_in_the_background(monkeypatch, http):

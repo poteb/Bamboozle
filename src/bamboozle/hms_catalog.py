@@ -223,6 +223,9 @@ class HmsCatalog:
         self._failures: dict[str, int] = {}
         self._retry_at: dict[str, float] = {}  # monotonic
         self._task: asyncio.Task | None = None
+        # Bumped whenever a catalogue is stored, so a refresh round can tell
+        # whether descriptions may have changed.
+        self.generation = 0
 
     # --- lookup ---------------------------------------------------------------
 
@@ -281,6 +284,7 @@ class HmsCatalog:
     def _store(self, prefix: str, entry: _Entry) -> None:
         with self._lock:
             self._entries[prefix] = entry
+            self.generation += 1
 
     async def refresh(self, serials: Iterable[str]) -> None:
         """Load the cache, then fetch each catalogue that's missing or stale:
@@ -330,18 +334,27 @@ class HmsCatalog:
         logger.info("HMS catalogue %s: %d messages, %d print errors",
                     name, len(tables.hms), len(tables.error))
 
-    async def _run(self, serials: Callable[[], Iterable[str]]) -> None:
+    async def _run(self, serials: Callable[[], Iterable[str]],
+                   on_change: Callable[[], None] | None) -> None:
         while True:
+            before = self.generation
             try:
                 await self.refresh(list(serials()))
             except Exception:
                 logger.exception("HMS catalogue refresh failed")
+            if on_change is not None and self.generation != before:
+                try:
+                    on_change()
+                except Exception:
+                    logger.exception("HMS catalogue change callback failed")
             await asyncio.sleep(CHECK_SECONDS)
 
-    def start(self, serials: Callable[[], Iterable[str]]) -> None:
-        """Keep the catalogues for `serials()` (re-read each round) fresh."""
+    def start(self, serials: Callable[[], Iterable[str]],
+              on_change: Callable[[], None] | None = None) -> None:
+        """Keep the catalogues for `serials()` (re-read each round) fresh;
+        `on_change()` after a round that loaded or fetched one."""
         if not self.running:
-            self._task = asyncio.create_task(self._run(serials))
+            self._task = asyncio.create_task(self._run(serials, on_change))
 
     async def stop(self) -> None:
         task, self._task = self._task, None
