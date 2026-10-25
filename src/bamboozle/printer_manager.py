@@ -413,7 +413,6 @@ class PrinterConnection:
 
         report = self._print_payload() or {}
         developer_mode = protocol.developer_mode(report)
-        commands_blocked = protocol.commands_blocked(report)
 
         online = gcode_str != "UNKNOWN" or nozzle_temp is not None
 
@@ -449,7 +448,6 @@ class PrinterConnection:
             camera_available=self.camera.available,
             filaments=filaments,
             developer_mode=developer_mode,
-            commands_blocked=commands_blocked,
             sort=self.cfg.sort,
             timestamp=time.time(),
         )
@@ -806,8 +804,6 @@ class PrinterManager:
     DISCOVERY_MAX_ENTRIES = 64
     # At shutdown, how long to let MQTT teardowns send their DISCONNECTs.
     SHUTDOWN_TEARDOWN_SECONDS = 2.0
-    # Requests that only ask for data; they work without Developer Mode.
-    QUERY_ACTIONS = frozenset({"refresh"})
     # How long the poll loop waits for one printer's poll step (health checks
     # + state read) before broadcasting its last known state instead. The step
     # keeps running; the next round waits on it again rather than starting
@@ -1181,17 +1177,14 @@ class PrinterManager:
         if not conn._connected:
             return False, "Printer not connected"
 
+        # The publish result alone decides. Developer Mode off is not proof
+        # that a command is dropped (the light works on such printers).
         try:
-            ok, msg = await asyncio.to_thread(
+            return await asyncio.to_thread(
                 self._run_command, conn.printer, action, params or {}
             )
         except Exception as e:
             return False, str(e)
-        if ok and conn.state.commands_blocked and action not in self.QUERY_ACTIONS:
-            # Published, but the printer will drop it. Still sent, so a wrong
-            # detection can never stop commands from working.
-            return False, protocol.COMMANDS_BLOCKED_MESSAGE
-        return ok, msg
 
     @staticmethod
     def _run_command(

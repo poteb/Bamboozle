@@ -331,7 +331,7 @@ class BamboozleApp {
         // Update camera feed — only add/remove, never replace an active stream
         this.updateCamera(card, id, s);
 
-        // Update notice line (refused access code / refused commands)
+        // Update notice line (refused access code / Developer Mode off ...)
         const noticeEl = card.querySelector('.card-notice');
         if (noticeEl) {
             const notice = this.cardNotice(s);
@@ -339,6 +339,7 @@ class BamboozleApp {
             // Only touch the live region when the text actually changes.
             if (noticeEl.textContent !== text) noticeEl.textContent = text;
             noticeEl.title = notice ? notice.title : '';
+            noticeEl.classList.toggle('quiet', !!(notice && notice.quiet));
         }
 
         const isPrinting = s.gcode_state === 'RUNNING';
@@ -730,7 +731,7 @@ class BamboozleApp {
             </header>
             ${cameraHtml}
             <div class="card-bottom">
-                <div class="card-notice" role="status" title="${notice ? this.esc(notice.title) : ''}">${notice ? this.esc(notice.text) : ''}</div>
+                <div class="card-notice${notice && notice.quiet ? ' quiet' : ''}" role="status" title="${notice ? this.esc(notice.title) : ''}">${notice ? this.esc(notice.text) : ''}</div>
                 <div class="job-section">${hasJob ? `
                     <div class="file-name">${this.esc(s.file_name || 'Unknown file')}</div>
                     ${this._thumbnailNoteHtml(s)}
@@ -785,6 +786,7 @@ class BamboozleApp {
     }
 
     // One line of "why isn't this working" on the card, or null.
+    // `quiet` marks an informational hint rather than a problem.
     cardNotice(s) {
         if (!s.online && s.last_error === 'auth_rejected') {
             return {
@@ -804,10 +806,18 @@ class BamboozleApp {
             const text = 'No data from the printer for over a minute: reconnecting';
             return { text, title: text };
         }
-        if (s.online && s.commands_blocked) {
-            const text = 'Printer is refusing control commands: enable LAN Only + '
-                + 'Developer Mode on the printer, then restart it';
-            return { text, title: text };
+        if (s.online && s.developer_mode === false) {
+            // A fact, not a claim: the light still works with it off; which
+            // print controls the firmware drops is unconfirmed.
+            return {
+                text: 'Developer Mode off: print controls (pause, resume, stop, speed) '
+                    + 'may be refused',
+                title: 'The printer reports Developer Mode off. Its firmware may ignore '
+                    + 'print controls from LAN apps; the light still works. To allow them, '
+                    + 'enable LAN Only + Developer Mode on the printer, then restart it. '
+                    + 'This changes the access code: update it in Settings.',
+                quiet: true,
+            };
         }
         return null;
     }

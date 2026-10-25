@@ -1,4 +1,9 @@
-"""Printer refusing control commands (Developer Mode off / HMS 0500050000010007)."""
+"""Developer Mode off (the `fun` bit): shown as a hint, never fails a command.
+
+The user's H2C and P2S report Developer Mode off and carry HMS
+0500050000010007, yet the chamber light toggles from Bamboozle work on both
+(confirmed 2026-10-25). So neither signal means "every command is refused".
+"""
 import asyncio
 
 import pytest
@@ -28,33 +33,20 @@ def test_developer_mode_from_fun(fun, expected):
     assert protocol.developer_mode(payload) is expected
 
 
-@pytest.mark.parametrize("hms", [
-    [VERIFY_FAILED],
-    [OTHER_HMS, VERIFY_FAILED],
-    [{"attr": "05000500", "code": "00010007"}],   # hex-string form
+def test_verify_failed_hms_alone_says_nothing_about_developer_mode():
+    """The HMS records a past refusal; without `fun` the state stays unknown."""
+    assert protocol.developer_mode({"hms": [VERIFY_FAILED]}) is None
+
+
+@pytest.mark.parametrize("hms, expected", [
+    ([OTHER_HMS, VERIFY_FAILED], {"0500060000020006", "0500050000010007"}),
+    ([{"attr": "05000500", "code": "00010007"}], {"0500050000010007"}),   # hex-string form
+    ([{"attr": "junk", "code": None}, 5], set()),                          # malformed entries
+    (None, set()),
 ])
-def test_verify_failed_hms_blocks_commands(hms):
-    assert protocol.commands_blocked({"hms": hms}) is True
-
-
-def test_developer_mode_off_blocks_commands():
-    assert protocol.commands_blocked({"fun": H2C_FUN, "hms": []}) is True
-
-
-def test_live_developer_mode_bit_beats_a_leftover_hms():
-    """The HMS records a past refusal; `fun` is the current state."""
-    assert protocol.commands_blocked({"fun": "14023FF18FFF9CB7", "hms": [VERIFY_FAILED]}) is False
-
-
-@pytest.mark.parametrize("payload", [
-    {},                                             # nothing received yet
-    {"hms": []},                                    # A1 / P1S: no fun, no HMS
-    {"hms": [OTHER_HMS]},
-    {"fun": "14023FF18FFF9CB7", "hms": []},         # dev mode on
-    {"hms": [{"attr": "junk", "code": None}, 5]},   # malformed entries
-])
-def test_commands_not_blocked(payload):
-    assert protocol.commands_blocked(payload) is False
+def test_hms_codes(hms, expected):
+    payload = {} if hms is None else {"hms": hms}
+    assert protocol.hms_codes(payload) == expected
 
 
 class FakeMqttClient:
@@ -81,26 +73,27 @@ def _conn(print_payload):
     return conn
 
 
-def test_state_reports_blocked_printer():
+def test_state_reports_developer_mode_off():
     conn = _conn({"fun": H2C_FUN, "hms": [OTHER_HMS, VERIFY_FAILED]})
     state = asyncio.run(conn.read_state())
     assert state.developer_mode is False
-    assert state.commands_blocked is True
+    # No claim that commands are refused: the light works on these printers.
+    assert "commands_blocked" not in state.model_dump()
 
 
-def test_state_reports_unknown_developer_mode_without_fun():
-    conn = _conn({"hms": []})
+@pytest.mark.parametrize("payload", [{"hms": []}, {"hms": [VERIFY_FAILED]}])
+def test_state_reports_unknown_developer_mode_without_fun(payload):
+    conn = _conn(payload)
     state = asyncio.run(conn.read_state())
     assert state.developer_mode is None
-    assert state.commands_blocked is False
 
 
-def _manager_with(conn, monkeypatch):
+def _manager_with(conn, monkeypatch, result):
     sent = []
 
     def fake_run(printer, action, params):
         sent.append(action)
-        return True, "Print paused"
+        return result
 
     monkeypatch.setattr(PrinterManager, "_run_command", staticmethod(fake_run))
     mgr = PrinterManager(AppConfig(), discovery_port=None)
@@ -108,24 +101,26 @@ def _manager_with(conn, monkeypatch):
     return mgr, sent
 
 
-@pytest.mark.parametrize("action", ["pause", "resume", "stop", "light_on", "set_speed"])
-def test_command_to_blocked_printer_says_why(monkeypatch, action):
+ACTIONS = ["pause", "resume", "stop", "light_on", "light_off", "set_speed", "refresh"]
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+@pytest.mark.parametrize("result", [(True, "Done"), (False, "MQTT session is down")])
+def test_developer_mode_off_never_changes_a_command_result(monkeypatch, action, result):
+    """The publish result alone decides, on a printer reporting Developer Mode off."""
     conn = _conn({"fun": H2C_FUN, "hms": [VERIFY_FAILED]})
     asyncio.run(conn.read_state())
-    mgr, sent = _manager_with(conn, monkeypatch)
+    assert conn.state.developer_mode is False
+    mgr, sent = _manager_with(conn, monkeypatch, result)
 
-    ok, msg = asyncio.run(mgr.execute_command(conn.cfg.id, action, {"level": 2}))
-
-    assert ok is False
-    assert "Developer Mode" in msg
-    # Still sent: if detection were ever wrong, the command must keep working.
+    assert asyncio.run(mgr.execute_command(conn.cfg.id, action, {"level": 2})) == result
     assert sent == [action]
 
 
-def test_command_to_unblocked_printer_is_unchanged(monkeypatch):
-    conn = _conn({"hms": []})
+def test_command_without_fun_is_unchanged(monkeypatch):
+    conn = _conn({"hms": [VERIFY_FAILED]})
     asyncio.run(conn.read_state())
-    mgr, sent = _manager_with(conn, monkeypatch)
+    mgr, sent = _manager_with(conn, monkeypatch, (True, "Print paused"))
 
     assert asyncio.run(mgr.execute_command(conn.cfg.id, "pause")) == (True, "Print paused")
     assert sent == ["pause"]

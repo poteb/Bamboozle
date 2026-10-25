@@ -10,18 +10,11 @@ from urllib.parse import unquote
 
 # `fun` is a hex bitfield sent by newer firmware (H2*, P2S, X1 on the 2025
 # authorization firmware); A1 / P1 don't send it. When this bit is SET,
-# Developer Mode is off and the printer drops control commands from LAN
-# clients such as us.
+# Developer Mode is off. That does NOT mean every command is dropped: the
+# user's H2C and P2S report it, yet the chamber light toggles from us work.
+# Which commands the firmware gates is unconfirmed, so it's only a hint
+# (print controls may be refused) and never fails a command.
 DEV_MODE_OFF_BIT = 0x20000000
-
-# HMS raised when the printer rejects a command it couldn't verify
-# ("MQTT command verification failed"). Status queries keep working.
-COMMAND_VERIFY_FAILED_HMS = "0500050000010007"
-
-COMMANDS_BLOCKED_MESSAGE = (
-    "Printer is refusing control commands: enable LAN Only + Developer Mode "
-    "on the printer, then restart it"
-)
 
 # CONNACK reason codes for a refused login (MQTT 3.1.1 return codes 4 and 5,
 # as paho reports them through the v5 ReasonCode API).
@@ -54,7 +47,12 @@ def _hex_or_int(value: Any) -> int | None:
 
 
 def developer_mode(print_payload: dict) -> bool | None:
-    """True / False from `fun`; None when the printer doesn't report it."""
+    """True / False from `fun`; None when the printer doesn't report it.
+
+    HMS 0500050000010007 ("MQTT command verification failed") isn't used as
+    a fallback: it records a past refusal, not the current state, and the
+    user's H2C / P2S carry it while the light works.
+    """
     fun = _hex_or_int(print_payload.get("fun"))
     if fun is None:
         return None
@@ -76,19 +74,6 @@ def hms_codes(print_payload: dict) -> set[str]:
             continue
         codes.add(f"{attr:08X}{code:08X}")
     return codes
-
-
-def commands_blocked(print_payload: dict) -> bool:
-    """True when the printer is known to refuse control commands.
-
-    `fun` is the live state, so it wins where reported. The HMS only records
-    that a command was refused and can outlive turning Developer Mode on;
-    it's the only evidence on printers without `fun`.
-    """
-    dev_mode = developer_mode(print_payload)
-    if dev_mode is not None:
-        return not dev_mode
-    return COMMAND_VERIFY_FAILED_HMS in hms_codes(print_payload)
 
 
 def connack_failed(reason_code: Any) -> bool:
