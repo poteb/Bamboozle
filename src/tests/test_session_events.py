@@ -264,3 +264,60 @@ def test_no_pushall_retries_once_a_full_report_came(lan):
         return conn.client.paho.published
 
     assert asyncio.run(scenario()) == []
+
+
+def test_the_new_sessions_full_report_replaces_the_kept_one(lan):
+    """Keys from before the drop must not linger in the new session's state."""
+    async def scenario():
+        conn = _conn()
+        await conn.connect()
+        deliver(conn.client, {"print": {**FULL["print"], "url": "ftp://old.3mf"}})
+        _drop(conn.client)
+        conn._retry_at = 0
+        await conn.connect()
+        deliver(conn.client, {"print": {"command": "push_status", "msg": 0, "gcode_state": "IDLE"}})
+        return conn
+
+    conn = asyncio.run(scenario())
+    assert conn.report.print == {"command": "push_status", "msg": 0, "gcode_state": "IDLE"}
+    assert conn._kept is False
+
+
+def test_a_kept_report_expires_even_once_reconnected(lan, monkeypatch):
+    """Reconnected but no full report within the grace: the old data isn't
+    shown as live any longer, and a full report is asked for again."""
+    monkeypatch.setattr(PrinterConnection, "MQTT_GRACE_SECONDS", 0.05)
+
+    async def scenario():
+        conn = _conn()
+        await conn.connect()
+        deliver(conn.client, FULL)
+        _drop(conn.client)
+        conn._retry_at = 0
+        await conn.connect()
+        deliver(conn.client, {"print": {"command": "push_status", "msg": 1, "mc_percent": 6}})
+        await asyncio.sleep(0.06)
+        state = await conn.read_state()
+        conn.client._paho = RecordingPaho()
+        await conn.ensure_full_report()
+        return state, conn.client.paho.published
+
+    state, published = asyncio.run(scenario())
+    assert state.gcode_state == "UNKNOWN"  # not the RUNNING from before the drop
+    assert [list(p) for _, p, _ in published] == [["pushing"]]
+
+
+def test_a_command_while_reconnecting_says_so():
+    from bamboozle.models import AppConfig
+    from bamboozle.printer_manager import PrinterManager
+
+    async def scenario():
+        mgr = PrinterManager(AppConfig(), discovery_port=None)
+        conn = mgr._new_connection(PrinterConfig(id="a", name="A1", ip="192.168.0.101",
+                                                 access_code="x", serial="S"))
+        mgr._connections["a"] = conn
+        conn._kept = True
+        return await mgr.execute_command("a", "pause")
+
+    result = asyncio.run(scenario())
+    assert result.success is False and "Reconnecting" in result.message

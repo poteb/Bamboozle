@@ -123,24 +123,32 @@ def test_the_heartbeat_sends_every_printer(monkeypatch):
 
 
 def test_the_poll_loop_sends_the_heartbeat(monkeypatch):
-    monkeypatch.setattr(PrinterManager, "HEARTBEAT_SECONDS", 0.1)
+    """Deterministic: one poll round = one tick of a fake clock."""
+    clock = [0]
+    monkeypatch.setattr("bamboozle.printer_manager.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(PrinterManager, "HEARTBEAT_SECONDS", 2)
+    rounds = []
 
-    async def no_housekeeping(self):
-        pass
-    monkeypatch.setattr(PrinterManager, "_poll_all", no_housekeeping)
+    async def tick(self):
+        clock[0] += 1
+        rounds.append(clock[0])
+        if len(rounds) > 6:
+            raise asyncio.CancelledError
+    monkeypatch.setattr(PrinterManager, "_poll_all", tick)
 
     async def scenario():
         mgr, ws = _manager("a")
-        mgr._config.poll_interval = 0.02
+        mgr._config.poll_interval = 0
         await mgr._broadcast_changed(["a"])
         ws.sent.clear()
-        task = asyncio.create_task(mgr._poll_loop())
-        await asyncio.sleep(0.35)
-        task.cancel()
+        try:
+            await mgr._poll_loop()
+        except asyncio.CancelledError:
+            pass
         return _updates(ws)
 
     beats = asyncio.run(scenario())
-    assert 2 <= len(beats) <= 4  # every ~0.1 s though nothing changed, not every round
+    assert len(beats) == 3  # rounds 2, 4, 6: nothing changed, yet every 2 ticks
 
 
 class StuckWs(FakeWs):

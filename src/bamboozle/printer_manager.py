@@ -137,9 +137,11 @@ class PrinterConnection:
         self.on_change: Callable[[], None] = lambda: None
         self.on_reconnect_due: Callable[[], None] = lambda: None
         self._closed = False  # disconnect() was called: this connection is done
-        # After a working session dropped: until this (monotonic) time the card
-        # keeps showing the kept report while a fresh session connects.
-        self._blip_until = 0.0
+        # After a working session dropped, its report is kept (and shown as
+        # live) until the next session's first full report replaces it, or
+        # until `_kept_until` (monotonic), whichever comes first.
+        self._kept = False
+        self._kept_until = 0.0
         # Some session of this connection delivered reports (the serial is
         # right), so later silence reads as "stale", not "check the serial".
         self._ever_reported = False
@@ -267,6 +269,14 @@ class PrinterConnection:
             return
         if frame.full:
             self._full_seen = True
+            if self._kept:
+                # The new session's own full state: nothing from before the drop
+                # may linger in it (merging keeps keys a frame doesn't carry).
+                info = self.report.info
+                self.report.reset()
+                frame = self.report.apply(payload)
+                self.report.info = info
+                self._kept = False
         self._check_waiters(frame)
         self._changed()
 
@@ -289,7 +299,8 @@ class PrinterConnection:
             logger.warning("%s: MQTT session to %s dropped; reconnecting", self.cfg.name, self.cfg.ip)
             lived = time.monotonic() - self._session_started
             self._reset_now(keep_report=True)
-            self._blip_until = time.monotonic() + self.MQTT_GRACE_SECONDS
+            self._kept = True
+            self._kept_until = time.monotonic() + self.MQTT_GRACE_SECONDS
             if lived >= self.STALE_SECONDS:
                 self._retry_at = time.monotonic()  # it worked: no backoff
                 self.on_reconnect_due()
@@ -485,23 +496,27 @@ class PrinterConnection:
 
     def _forget_kept_report(self) -> None:
         self.report.reset()
-        self._blip_until = 0.0
+        self._kept = False
+        # Whatever this session merged on top of it is gone too: ask for a
+        # full report again at the next poll round.
+        self._full_seen = False
+        self._pushall_at = -math.inf
 
-    def _in_blip(self) -> bool:
-        """A working session just dropped and a fresh one is on its way."""
-        if not self._blip_until:
-            return False
-        if self._connected or self._auth_rejected or time.monotonic() >= self._blip_until:
-            if not self._connected:
-                self._forget_kept_report()  # the grace ran out: it's really down
-            self._blip_until = 0.0
-            return False
-        return True
+    def _expire_kept_report(self) -> None:
+        """The report kept from before a drop is only shown for a while."""
+        if self._kept and (self._auth_rejected or time.monotonic() >= self._kept_until):
+            self._forget_kept_report()
+
+    @property
+    def reconnecting(self) -> bool:
+        """A working session dropped and the card still shows its report."""
+        return self._kept and not self._connected
 
     async def read_state(self) -> PrinterState:
         """Rebuild `state` from the merged report (and the connection's own
         knowledge: online, camera, thumbnail, why it's down)."""
-        if (not self._connected or self._auth_rejected) and not self._in_blip():
+        self._expire_kept_report()
+        if (not self._connected or self._auth_rejected) and not self._kept:
             # Never started MQTT (e.g. unreachable) or the login was refused.
             self.state.online = False
             self.state.last_error = (
@@ -1220,6 +1235,8 @@ class PrinterManager:
         except commands.InvalidCommand as e:
             return CommandResult(False, str(e))
         if not conn._connected:
+            if conn.reconnecting:
+                return CommandResult(False, "Reconnecting to the printer: try again in a moment")
             return CommandResult(False, "Printer not connected")
         try:
             result = await conn.run_command(command)
