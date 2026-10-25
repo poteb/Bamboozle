@@ -18,7 +18,8 @@ from .protocol import hex_or_int
 # DevModel codes. X1 family: the flat `chamber_temper` is a real sensor and the
 # door is `home_flag` bit 23. H2 / P2S report the chamber under `device.ctc`.
 _X1_FAMILY = frozenset({"BL-P001", "BL-P002", "C13"})
-_CHAMBER_SENSOR = _X1_FAMILY | {"O1C", "O1C2", "O1D", "N7"}
+_H2_P2S = frozenset({"O1C", "O1C2", "O1D", "N7"})
+_CHAMBER_SENSOR = _X1_FAMILY | _H2_P2S
 # The A1 and A1 mini have neither an aux nor a chamber fan, yet echo the part
 # fan's value in `big_fan1_speed` / `big_fan2_speed`.
 _NO_AUX_CHAMBER_FANS = frozenset({"N1", "N2S"})
@@ -101,6 +102,7 @@ STAGE_NAMES: dict[int, str] = {
 }
 _IDLE_STAGES = frozenset({-1, 255})
 _JOB_STATES = frozenset({"RUNNING", "PAUSE"})
+_JOB_ENDED = frozenset({"FINISH", "FAILED"})
 
 _SPEED_NAMES = {1: "Silent", 2: "Standard", 3: "Sport", 4: "Ludicrous"}
 
@@ -238,10 +240,11 @@ def chamber(print_payload: dict, model: str) -> tuple[float | None, float | None
 # --- Stage --------------------------------------------------------------------
 
 def stage(print_payload: dict) -> int | None:
-    """`stg_cur`, or None when idle. The A1 / P1 report 0 ("printing") while
-    idle, so 0 only counts during a job."""
+    """`stg_cur`, or None when idle or the job has ended (a leftover stage
+    isn't current). The A1 / P1 report 0 ("printing") while idle, so 0 only
+    counts during a job."""
     n = _int(print_payload.get("stg_cur"))
-    if n is None or n in _IDLE_STAGES:
+    if n is None or n in _IDLE_STAGES or print_payload.get("gcode_state") in _JOB_ENDED:
         return None
     if n == 0 and print_payload.get("gcode_state") not in _JOB_STATES:
         return None
@@ -319,12 +322,15 @@ def wifi_dbm(print_payload: dict) -> int | None:
 
 
 def door_open(print_payload: dict, model: str) -> bool | None:
-    """Bit 23 of `stat` (a hex string), or of `home_flag` on the X1 family.
-    None when the printer reports no door sensor."""
+    """Bit 23 of `home_flag` on the X1 family, of `stat` (a hex string) on
+    H2 / P2S. None for other or unknown models: the A1 / P1 have no door
+    sensor, and the bit means something else there."""
     if model in _X1_FAMILY:
         flags = _int(print_payload.get("home_flag"))
-    else:
+    elif model in _H2_P2S:
         flags = hex_or_int(print_payload.get("stat"))
+    else:
+        return None
     if flags is None:
         return None
     return bool(flags & _DOOR_BIT)

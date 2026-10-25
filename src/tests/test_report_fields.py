@@ -77,6 +77,24 @@ def test_dual_nozzles_left_then_right_with_targets():
     assert (right.type, right.diameter) == ("HS01", 0.4)
 
 
+def test_dual_nozzle_type_follows_a_nozzle_picked_from_the_rack():
+    """H2C: `hnow` is the id of the nozzle mounted on the extruder."""
+    device = {
+        "extruder": {"info": [
+            {"id": 0, "hnow": 17, "temp": 30},
+            {"id": 1, "hnow": 1, "temp": 31},
+        ]},
+        "nozzle": {"info": [
+            {"id": 17, "type": "HH01", "diameter": 0.6},
+            {"id": 0, "type": "HS01", "diameter": 0.4},
+            {"id": 1, "type": "HS01", "diameter": 0.4},
+        ]},
+    }
+    left, right = report.nozzles({"device": device})
+    assert (right.type, right.diameter) == ("HH01", 0.6)
+    assert (left.type, left.diameter) == ("HS01", 0.4)
+
+
 def test_single_extruder_device_list_is_one_nozzle():
     """The P2S sends a one-entry extruder list next to the flat fields."""
     p = {"nozzle_temper": 28.0, "nozzle_target_temper": 0.0,
@@ -146,6 +164,11 @@ def test_chamber(payload, model, expected):
     (255, "FINISH", None),
     (None, "RUNNING", None),
     ("7", "RUNNING", 7),
+    # A stage left over after the job ended isn't current.
+    (7, "FINISH", None),
+    (7, "FAILED", None),
+    # Screen actions outside a job (e.g. loading filament) still show.
+    (24, "IDLE", 24),
 ])
 def test_stage(stg_cur, gcode_state, expected):
     p = {"gcode_state": gcode_state}
@@ -181,6 +204,13 @@ def test_stage_names_cover_the_documented_range():
 ])
 def test_fan_percent(value, expected):
     assert report.fan_percent(value) == expected
+
+
+def test_fan_percent_over_the_whole_scale():
+    values = [report.fan_percent(n) for n in range(16)]
+    assert values == sorted(values)
+    assert values[0] == 0 and values[-1] == 100
+    assert all(v % 10 == 0 for v in values)
 
 
 def test_fans():
@@ -254,10 +284,15 @@ def test_wifi_dbm(value, expected):
     # X1 reports the door in home_flag bit 23.
     ({"home_flag": 0x00800000}, X1C, True),
     ({"home_flag": 0}, X1C, False),
-    # A1 / P1S: no door sensor reported (home_flag bit 23 means something else).
+    # A1 / P1S: no door sensor (bit 23 means something else there).
     ({"home_flag": 0x00800000}, A1, None),
     ({"home_flag": 847201727}, P1S, None),
+    ({"stat": "800000"}, A1, None),
+    ({"stat": "800000"}, P1S, None),
+    # Unknown model (SSDP not heard yet): don't guess which field it is.
+    ({"stat": "800000"}, "", None),
     ({}, "", None),
+    ({}, H2C, None),
 ])
 def test_door_open(payload, model, expected):
     assert report.door_open(payload, model) is expected
@@ -390,7 +425,7 @@ def test_firmware_is_asked_for_until_the_printer_answers(monkeypatch):
     assert req["info"]["command"] == "get_version"
     assert isinstance(req["info"]["sequence_id"], str)
 
-    monkeypatch.setattr(PrinterConnection, "VERSION_RETRY_SECONDS", 0.0)
+    conn._version_wait = 0.0  # due again
     asyncio.run(conn.read_state())
     assert len(_version_requests(conn)) == 2
 
@@ -416,3 +451,29 @@ def test_a_decoder_failure_keeps_the_rest_of_the_read(monkeypatch):
     state = _read({"print": {"gcode_state": "IDLE", "nozzle_temper": 25.0}})
     assert state.nozzles == []
     assert state.stage_name == ""
+
+
+def test_unanswered_version_requests_back_off(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("bamboozle.printer_manager.time.monotonic", lambda: clock[0])
+    conn = _recording_conn()
+    sent_at = []
+    for t in range(0, 4000, 10):
+        clock[0] = 1000.0 + t
+        before = len(_version_requests(conn))
+        asyncio.run(conn.read_state())
+        if len(_version_requests(conn)) > before:
+            sent_at.append(t)
+    gaps = [b - a for a, b in zip(sent_at, sent_at[1:])]
+    assert gaps[:4] == [60, 120, 240, 480]
+    assert max(gaps) == 900
+
+
+def test_a_new_session_asks_for_the_version_again(monkeypatch):
+    from bamboozle import mqtt
+    monkeypatch.setattr(mqtt, "retire", lambda printer: None)
+    conn = _recording_conn()
+    asyncio.run(conn.read_state())
+    assert len(_version_requests(conn)) == 1
+    asyncio.run(conn.reset_session())
+    assert conn._version_asked_at == float("-inf")
