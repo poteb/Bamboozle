@@ -250,8 +250,9 @@ class PrinterConnection:
         reconnect never waits for (or races) its network thread.
         """
         mqtt.retire(self.printer)
-        self.printer = self._new_printer()
         self._schedule_retry()
+        # Building a client loads the system CA store; keep it off the loop.
+        self.printer = await asyncio.to_thread(self._new_printer)
 
     async def read_state(self) -> PrinterState:
         if not self._connected or self._auth_rejected:

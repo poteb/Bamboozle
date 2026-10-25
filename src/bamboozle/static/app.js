@@ -716,7 +716,7 @@ class BamboozleApp {
         }
 
         const lightBtn = `<button class="outline small icon-btn light-btn" onclick="app.sendCommand('${id}','${s.light_on ? 'light_off' : 'light_on'}')" title="Toggle light" ${s.online ? '' : 'style="display:none"'}>${ICO.light(s.light_on ? '#ffc107' : '#888')}</button>`;
-        const refreshBtn = `<button class="outline small icon-btn refresh-btn" onclick="app.sendCommand('${id}','refresh')" title="Refresh: ask the printer for a full status report" ${s.online ? '' : 'style="display:none"'}>${ICO.refresh('#888')}</button>`;
+        const refreshBtn = `<button class="outline small icon-btn refresh-btn" onclick="app.sendCommand('${id}','refresh')" title="Refresh: ask the printer for a full status report" aria-label="Refresh" ${s.online ? '' : 'style="display:none"'}>${ICO.refresh('#888')}</button>`;
 
         return `
             <header>
