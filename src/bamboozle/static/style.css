@@ -81,11 +81,9 @@
     color: var(--pico-muted-color);
 }
 
-.ws-status:empty {
-    display: none;
-}
-
-.ws-status::before {
+/* Stays rendered while empty (takes no space) so screen readers keep the
+   role="status" live region and announce the text when it appears. */
+.ws-status:not(:empty)::before {
     content: "";
     width: 0.5rem;
     height: 0.5rem;
@@ -95,7 +93,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-    .ws-status::before {
+    .ws-status:not(:empty)::before {
         animation: none;
     }
 }

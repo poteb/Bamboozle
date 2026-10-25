@@ -262,6 +262,16 @@ test('a failed REST command result toasts as an error', async () => {
     assert.equal(toasts[0].message, 'Printer not connected');
 });
 
+test('a non-OK REST response toasts its status, not "unreachable"', async () => {
+    const { app, fetches, toasts } = setup();
+    const done = app.sendCommand('p1', 'pause');
+    fetches[1].resolve({ ok: false, status: 500, json: async () => { throw new SyntaxError('not json'); } });
+    await done;
+    assert.equal(toasts.length, 1);
+    assert.equal(toasts[0].type, 'error');
+    assert.match(toasts[0].message, /500/);
+});
+
 test('a REST command that cannot reach the server toasts an error', async () => {
     const { app, fetches, toasts } = setup();
     const done = app.sendCommand('p1', 'pause');

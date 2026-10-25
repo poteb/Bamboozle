@@ -181,8 +181,8 @@ class BamboozleApp {
     _updateWsMarker() {
         const marker = document.getElementById('ws-status');
         if (!marker) return;
-        // Text toggles visibility (CSS hides it when empty) and lets the
-        // role="status" live region announce the change.
+        // Empty = invisible (see .ws-status in style.css); setting the text
+        // lets the role="status" live region announce it.
         marker.textContent = this._wsMarkerArmed && !this._wsOpen() ? 'Reconnecting…' : '';
     }
 
@@ -798,7 +798,7 @@ class BamboozleApp {
                 body: JSON.stringify({enabled}),
             });
             const json = await res.json();
-            if (json.success) {
+            if (json.success && this.printers[printerId]) {
                 this.printers[printerId].camera_enabled = json.camera_enabled;
                 if (!json.camera_enabled) {
                     this.printers[printerId].camera_available = false;
@@ -847,6 +847,10 @@ class BamboozleApp {
         }
         try {
             const res = await fetch(`/api/printers/${encodeURIComponent(printerId)}/${path}`, opts);
+            if (!res.ok) {
+                this.showToast(`Command failed (${res.status})`, 'error');
+                return;
+            }
             const json = await res.json();
             this.showToast(json.message || (json.success ? 'Done' : 'Command failed'),
                 json.success ? 'success' : 'error');
