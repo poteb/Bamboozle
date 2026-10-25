@@ -180,15 +180,15 @@ def test_vir_slot_and_vt_tray_are_both_kept():
 # --- Frames that aren't status --------------------------------------------------
 
 
-def test_project_file_only_contributes_its_url():
+def test_project_file_contributes_its_url_and_job_name_only():
     r = MergedReport()
     r.apply(_status(msg=0, subtask_name="Benchy", job_id="123"))
     frame = r.apply({"print": {"command": "project_file", "url": "ftp://Benchy.3mf",
                                "job_id": 123, "subtask_name": "other", "sequence_id": "9"}})
     assert not frame.status
     assert r.print["url"] == "ftp://Benchy.3mf"
-    assert r.print["job_id"] == "123"
-    assert r.print["subtask_name"] == "Benchy"
+    assert r.print["job_id"] == "123"  # an int there, a string in status
+    assert r.print["subtask_name"] == "other"
 
 
 def test_command_echoes_are_not_merged():
@@ -267,3 +267,60 @@ def test_the_merged_state_does_not_alias_the_frame():
     r.apply(frame)
     frame["print"]["ams"]["ams"][0]["tray"][0]["tray_type"] = "CHANGED"
     assert r.print["ams"]["ams"][0]["tray"][0]["tray_type"] == "PLA"
+
+
+# --- Review follow-ups -----------------------------------------------------------
+
+
+def test_a_state_only_update_of_a_loaded_tray_merges():
+    """{"id", "state": 11} on a loaded slot is a state change, not an empty slot."""
+    r = MergedReport()
+    r.apply(_full_with_ams([_unit(0, [_tray(0), _tray(1)])], tray_bits="3"))
+    r.apply(_status(ams={"ams": [{"id": "0", "tray": [{"id": "1", "state": 11}]}]}))
+    tray = r.print["ams"]["ams"][0]["tray"][1]
+    assert tray["tray_type"] == "PLA" and tray["state"] == 11
+
+
+def test_a_state_only_tray_on_a_slot_whose_bit_is_off_is_empty():
+    r = MergedReport()
+    r.apply(_full_with_ams([_unit(0, [_tray(0), _tray(1)])], tray_bits="1"))
+    r.apply(_status(ams={"ams": [{"id": "0", "tray": [{"id": "1", "state": 3}]}]}))
+    assert r.print["ams"]["ams"][0]["tray"][1] == {"id": "1", "state": 3}
+
+
+def test_an_id_only_tray_is_empty():
+    r = MergedReport()
+    r.apply(_full_with_ams([_unit(0, [_tray(0), _tray(1)])], tray_bits="3"))
+    r.apply(_status(ams={"ams": [{"id": "0", "tray": [{"id": "1"}]}]}))
+    assert r.print["ams"]["ams"][0]["tray"][1] == {"id": "1"}
+
+
+def test_a_complete_tray_replaces_the_old_one():
+    """A non-RFID spool replacing an RFID one must not keep its brand."""
+    r = MergedReport()
+    rfid = {**_tray(0), "tray_id_name": "A00-B5", "tray_sub_brands": "PLA Basic"}
+    r.apply(_full_with_ams([_unit(0, [rfid])], tray_bits="1"))
+    generic = {"id": "0", "tray_type": "PETG", "tray_color": "00FF00FF", "state": 11}
+    r.apply(_status(ams={"ams": [{"id": "0", "tray": [generic]}]}))
+    assert r.print["ams"]["ams"][0]["tray"][0] == generic
+
+
+def test_msg_as_a_string_zero_is_a_full_report():
+    assert MergedReport().apply(_status(msg="0")).full
+
+
+def test_project_file_also_brings_the_new_job_name():
+    r = MergedReport()
+    r.apply(_status(msg=0, subtask_name="Old"))
+    r.apply({"print": {"command": "project_file", "subtask_name": "New", "url": "ftp://New.3mf",
+                       "param": "Metadata/plate_1.gcode", "sequence_id": "5"}})
+    assert r.print["subtask_name"] == "New"
+    assert "param" not in r.print and r.print.get("sequence_id") is None
+
+
+def test_merged_lists_are_capped():
+    from bamboozle.merge import MAX_MERGED_ITEMS
+    r = MergedReport()
+    r.apply(_status(msg=0, things=[{"id": 0}]))
+    r.apply(_status(things=[{"id": i} for i in range(1, MAX_MERGED_ITEMS + 50)]))
+    assert len(r.print["things"]) == MAX_MERGED_ITEMS

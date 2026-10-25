@@ -1,3 +1,4 @@
+import json
 import io
 import threading
 import time
@@ -64,3 +65,65 @@ class FakeFfmpeg:
 
     def wait(self, timeout=None):
         return self.returncode
+
+
+# --- MQTT (bamboozle.mqtt.BambuClient) -------------------------------------------
+
+
+class FakePahoMessage:
+    def __init__(self, payload):
+        self.payload = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+
+
+def deliver(client, payload):
+    """Hand a report to a BambuClient the way paho's network thread does."""
+    client._on_message(client.paho, None, FakePahoMessage(payload))
+
+
+def connack(client, rc):
+    """Hand a CONNACK (a paho ReasonCode, or 0) to a BambuClient like paho does."""
+    client._on_connect(client.paho, None, None, rc, None)
+
+
+class RecordingPaho:
+    """Stands in for the paho client inside a BambuClient; records publishes."""
+
+    def __init__(self, connected=True):
+        self.connected = connected
+        self.published = []  # (topic, payload dict, qos)
+
+    def is_connected(self):
+        return self.connected
+
+    def publish(self, topic, payload, qos=0):
+        self.published.append((topic, json.loads(payload), qos))
+
+        class Info:
+            rc = 0
+        return Info()
+
+    def subscribe(self, topic, qos=0):
+        return (0, 1)
+
+    def disconnect(self):
+        self.connected = False
+
+    def loop_stop(self):
+        pass
+
+
+def connected(conn, print_payload=None, paho=None):
+    """A PrinterConnection that looks logged in, with a recording paho client
+    and (optionally) a full report merged. Call inside the test's event loop."""
+    import asyncio
+    conn.client._paho = paho or RecordingPaho()
+    conn._connected = True
+    conn._loop = asyncio.get_running_loop()
+    if print_payload is not None:
+        conn.report.apply({"print": {"command": "push_status", "msg": 0, **print_payload}})
+    return conn
+
+
+def published(conn):
+    """The payloads a `connected` connection published, in order."""
+    return [payload for _, payload, _ in conn.client.paho.published]

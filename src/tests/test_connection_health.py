@@ -1,10 +1,9 @@
 """PrinterConnection.is_offline / reconnect pacing, driven through connect()."""
 import asyncio
 
-import bambulabs_api as bl
 import pytest
 
-from bamboozle import discovery
+from bamboozle import discovery, mqtt
 from bamboozle.models import AppConfig, PrinterConfig
 from bamboozle.printer_manager import PrinterConnection, PrinterManager
 
@@ -20,7 +19,7 @@ class FakeMqtt:
 @pytest.fixture
 def lan(monkeypatch):
     monkeypatch.setattr(discovery, "tcp_reachable", lambda ip, port=8883, timeout=3.0: True)
-    monkeypatch.setattr(bl.Printer, "mqtt_start", lambda self: None)
+    monkeypatch.setattr(mqtt.BambuClient, "start", lambda self: None)
     monkeypatch.setattr(PrinterConnection, "MQTT_SETTLE_SECONDS", 0)
     monkeypatch.setattr(PrinterConnection, "MQTT_GRACE_SECONDS", 0.2)
 
@@ -28,7 +27,7 @@ def lan(monkeypatch):
 def _conn():
     conn = PrinterConnection(
         PrinterConfig(name="P1S", ip="192.168.0.103", access_code="x", serial="01P00C511100150"))
-    conn.printer.mqtt_client = FakeMqtt()
+    conn.client._paho = FakeMqtt()
     return conn
 
 
@@ -40,10 +39,10 @@ def test_brief_blip_on_long_lived_session_is_not_offline(lan):
     async def scenario():
         conn = _conn()
         await conn.connect()
-        conn.printer.mqtt_client.up = True
+        conn.client._paho.up = True
         await asyncio.sleep(0.3)          # session up for longer than the grace
         assert conn.is_offline() is False  # seen connected now
-        conn.printer.mqtt_client.up = False  # paho drops; it may reconnect itself
+        conn.client._paho.up = False  # socket briefly down (e.g. mid-handshake)
         return conn.is_offline()
 
     assert asyncio.run(scenario()) is False
@@ -53,9 +52,9 @@ def test_session_down_longer_than_grace_is_offline(lan):
     async def scenario():
         conn = _conn()
         await conn.connect()
-        conn.printer.mqtt_client.up = True
+        conn.client._paho.up = True
         assert conn.is_offline() is False
-        conn.printer.mqtt_client.up = False
+        conn.client._paho.up = False
         await asyncio.sleep(0.3)
         return conn.is_offline()
 
@@ -68,7 +67,7 @@ def test_session_that_never_comes_up_backs_off(lan, monkeypatch):
     monkeypatch.setattr(PrinterConnection, "MQTT_GRACE_SECONDS", 0.05)
     monkeypatch.setattr(PrinterConnection, "INITIAL_BACKOFF_SECONDS", 0.1)
     starts = []
-    monkeypatch.setattr(bl.Printer, "mqtt_start", lambda self: starts.append(1))
+    monkeypatch.setattr(mqtt.BambuClient, "start", lambda self: starts.append(1))
 
     async def scenario():
         cfg = PrinterConfig(name="P1S", ip="192.168.0.51", access_code="x", serial="01P00C511100150")

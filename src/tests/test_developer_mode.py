@@ -11,6 +11,7 @@ import pytest
 from bamboozle import protocol
 from bamboozle.models import AppConfig, PrinterConfig
 from bamboozle.printer_manager import PrinterConnection, PrinterManager
+from fakes import connected
 
 # Captured from the user's H2C (Developer Mode off): bit 0x20000000 of `fun`
 # is set, and HMS carries 0x05000500 / 0x00010007 next to unrelated entries.
@@ -49,26 +50,10 @@ def test_hms_codes(hms, expected):
     assert protocol.hms_codes(payload) == expected
 
 
-class FakeMqttClient:
-    def is_connected(self):
-        return True
-
-
-class DumpOnlyPrinter:
-    """Only `mqtt_dump()`; every library getter raises, so _read_sync defaults."""
-
-    def __init__(self, print_payload):
-        self._dump = {"print": print_payload}
-        self.mqtt_client = FakeMqttClient()
-
-    def mqtt_dump(self):
-        return self._dump
-
-
 def _conn(print_payload):
     conn = PrinterConnection(
         PrinterConfig(name="H2C", ip="192.168.0.102", access_code="x", serial="31B00000000000"))
-    conn.printer = DumpOnlyPrinter(print_payload)
+    conn.report.print = dict(print_payload)
     conn._connected = True
     return conn
 
@@ -88,39 +73,23 @@ def test_state_reports_unknown_developer_mode_without_fun(payload):
     assert state.developer_mode is None
 
 
-def _manager_with(conn, monkeypatch, result):
-    sent = []
-
-    def fake_run(printer, action, params):
-        sent.append(action)
-        return result
-
-    monkeypatch.setattr(PrinterManager, "_run_command", staticmethod(fake_run))
-    mgr = PrinterManager(AppConfig(), discovery_port=None)
-    mgr._connections[conn.cfg.id] = conn
-    return mgr, sent
-
-
 ACTIONS = ["pause", "resume", "stop", "light_on", "light_off", "set_speed", "refresh"]
 
 
 @pytest.mark.parametrize("action", ACTIONS)
-@pytest.mark.parametrize("result", [(True, "Done"), (False, "MQTT session is down")])
-def test_developer_mode_off_never_changes_a_command_result(monkeypatch, action, result):
-    """The publish result alone decides, on a printer reporting Developer Mode off."""
-    conn = _conn({"fun": H2C_FUN, "hms": [VERIFY_FAILED]})
-    asyncio.run(conn.read_state())
-    assert conn.state.developer_mode is False
-    mgr, sent = _manager_with(conn, monkeypatch, result)
+def test_developer_mode_off_never_fails_a_command(monkeypatch, action):
+    """Sent and not confirmed reads as success (not confirmed), never failure."""
+    monkeypatch.setattr(PrinterConnection, "COMMAND_CONFIRM_SECONDS", 0.05)
 
-    assert asyncio.run(mgr.execute_command(conn.cfg.id, action, {"level": 2})) == result
-    assert sent == [action]
+    async def scenario():
+        state = "PAUSE" if action == "resume" else "RUNNING"  # not already done
+        conn = connected(_conn({"fun": H2C_FUN, "hms": [VERIFY_FAILED], "gcode_state": state}))
+        await conn.read_state()
+        assert conn.state.developer_mode is False
+        mgr = PrinterManager(AppConfig(), discovery_port=None)
+        mgr._connections[conn.cfg.id] = conn
+        return await mgr.execute_command(conn.cfg.id, action, {"level": 2})
 
-
-def test_command_without_fun_is_unchanged(monkeypatch):
-    conn = _conn({"hms": [VERIFY_FAILED]})
-    asyncio.run(conn.read_state())
-    mgr, sent = _manager_with(conn, monkeypatch, (True, "Print paused"))
-
-    assert asyncio.run(mgr.execute_command(conn.cfg.id, "pause")) == (True, "Print paused")
-    assert sent == ["pause"]
+    result = asyncio.run(scenario())
+    assert result.success is True
+    assert result.confirmed is False

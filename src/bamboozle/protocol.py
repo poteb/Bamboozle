@@ -1,7 +1,7 @@
 """Facts about the Bambu LAN MQTT protocol, as pure functions over report payloads.
 
 `print_payload` is the `print` object of a device report (what
-`Printer.mqtt_dump()["print"]` holds once a pushall has arrived).
+`MergedReport.print` holds, see merge.py).
 """
 from __future__ import annotations
 

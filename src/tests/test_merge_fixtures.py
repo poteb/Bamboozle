@@ -45,6 +45,32 @@ def test_every_full_report_decodes_the_same_merged_or_alone(name):
     assert checked >= 1
 
 
+# Fields that drift between the last delta and the full report that follows.
+_DRIFT = {"nozzle_temp", "bed_temp", "wifi_dbm", "nozzles"}
+
+
+def test_deltas_alone_keep_the_state_a_full_report_then_confirms():
+    """The state merged from deltas just before each full report (after the
+    first) equals what that full report shows, apart from drifting readings.
+    Only the A1 capture has full reports after the first (Bambu Studio's)."""
+    name = "a1"
+    previous = None
+    compared = 0
+    seen_full = False
+    for m, frame, merged in replay(name):
+        if frame.full and seen_full and previous is not None:
+            current, _ = _state(merged.print, merged.info, name)
+            for state in (previous, current):
+                for key in _DRIFT:
+                    state.pop(key, None)
+            assert previous == current, m.t
+            compared += 1
+        seen_full = seen_full or frame.full
+        if seen_full:
+            previous, _ = _state(merged.print, merged.info, name)
+    assert compared == 3
+
+
 def test_p1s_ams_trays_never_blank_on_its_partial_unit_pushes():
     """P1S AMS deltas carry only {"ams": [unit]}: the library's one-level
     merge dropped ams_exist_bits and with it every tray."""
@@ -98,10 +124,11 @@ def test_non_status_frames_are_not_telemetry(name):
     assert "push_status" not in kinds
 
 
-def test_project_file_echo_contributes_only_its_url():
+def test_project_file_echo_contributes_only_its_url_and_job_name():
     for m, frame, merged in replay("a1"):
         if frame.command == "project_file":
             assert merged.print["url"] == m.print["url"]
+            assert merged.print["subtask_name"] == m.print["subtask_name"]
             assert isinstance(merged.print.get("job_id", ""), str)
             return
     pytest.fail("the A1 capture has a project_file echo")
