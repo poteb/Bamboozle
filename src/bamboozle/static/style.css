@@ -419,6 +419,7 @@
 
 .progress-row progress {
     flex: 1;
+    min-width: 0;
     margin: 0;
 }
 
@@ -426,6 +427,13 @@
     font-weight: bold;
     min-width: 3em;
     text-align: right;
+}
+
+.progress-layers {
+    font-size: 0.9rem;
+    font-variant-numeric: tabular-nums;
+    opacity: 0.7;
+    white-space: nowrap;
 }
 
 /* Detail row */

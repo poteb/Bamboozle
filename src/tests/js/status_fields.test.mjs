@@ -105,6 +105,22 @@ test('the job section of a running print carries the stage line too', () => {
     assert.match(html, /<progress value="3"/);
 });
 
+test('the progress row shows the layer count once the printer reports a total', () => {
+    const job = { online: true, gcode_state: 'RUNNING', progress: 12 };
+    assert.match(
+        app.jobSectionHtml({ ...job, current_layer: 15, total_layers: 99 }),
+        /class="progress-layers"[^>]*>15\/99</,
+    );
+    assert.match(
+        app.jobSectionHtml({ ...job, current_layer: 0, total_layers: 99 }),
+        /class="progress-layers"[^>]*>0\/99</,
+    );
+    assert.doesNotMatch(
+        app.jobSectionHtml({ ...job, current_layer: 0, total_layers: 0 }),
+        /progress-layers/,
+    );
+});
+
 test('speed shows the level name next to the percentage', () => {
     assert.equal(app.speedText({ print_speed: 100, speed_name: 'Standard' }), 'Standard · 100%');
     assert.equal(app.speedText({ print_speed: 124 }), '124%');

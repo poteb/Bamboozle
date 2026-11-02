@@ -750,6 +750,9 @@ class BamboozleApp {
             : '--';
         const etaClass = s.remaining_minutes > 0 && s.remaining_minutes < 10 ? 'eta-green'
             : s.remaining_minutes > 0 && s.remaining_minutes < 30 ? 'eta-yellow' : '';
+        const layersHtml = s.total_layers > 0
+            ? `<span class="progress-layers" title="Layer ${s.current_layer} of ${s.total_layers}">${s.current_layer}/${s.total_layers}</span>`
+            : '';
         return `
                     <div class="file-name">${this.esc(s.file_name || 'Unknown file')}</div>
                     ${stageHtml}
@@ -757,6 +760,7 @@ class BamboozleApp {
                     <div class="progress-row">
                         <progress value="${s.progress}" max="100"></progress>
                         <span class="progress-pct">${s.progress}%</span>
+                        ${layersHtml}
                     </div>
                     <div class="detail-row">
                         <span class="eta-value ${etaClass}">ETA: ${eta}</span>
