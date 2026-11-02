@@ -317,6 +317,7 @@ class BamboozleApp {
         // Remove cards for printers no longer present
         for (const card of this.grid.querySelectorAll('.printer-card')) {
             if (!this.printers[card.dataset.printerId]) {
+                this._releaseStreams(card);
                 card.remove();
             }
         }
@@ -499,15 +500,20 @@ class BamboozleApp {
         }, 500);
     }
 
+    // An <img> leaving the page keeps its MJPEG connection open unless its src
+    // is cleared first. Firefox allows 6 per server, then every request to the
+    // app hangs: a new camera stays a dark box and new tabs don't load.
+    _releaseStreams(el) {
+        for (const img of el.querySelectorAll('img[src*="/stream/"]')) {
+            img.removeAttribute('src');
+        }
+    }
+
     _clearCameraFeed(id) {
         const card = this.grid?.querySelector(`[data-printer-id="${id}"]`);
         const feed = card?.querySelector('.camera-feed');
         if (feed) {
-            const img = feed.querySelector('img');
-            if (img) {
-                img.removeAttribute('src');
-                img.remove();
-            }
+            this._releaseStreams(feed);
             feed.className = 'camera-feed camera-offline';
             feed.innerHTML = '<span>Popped out</span>';
         }
@@ -540,6 +546,7 @@ class BamboozleApp {
                 const header = card.querySelector('header');
                 header.after(camFeed);
             } else if (camFeed.querySelector('img[src*="/stream/"]')) {
+                this._releaseStreams(camFeed);
                 camFeed.className = 'camera-feed camera-offline';
                 camFeed.innerHTML = '<span>Camera connecting...</span>';
             }
@@ -554,6 +561,7 @@ class BamboozleApp {
             } else {
                 const existing = camFeed.querySelector('img[src*="/thumbnail"]');
                 if (!existing) {
+                    this._releaseStreams(camFeed);
                     camFeed.className = 'camera-feed thumbnail-feed';
                     camFeed.innerHTML = `<img src="${thumbUrl}" alt="Model preview">`;
                 } else if (existing.getAttribute('src') !== thumbUrl) {
@@ -561,6 +569,7 @@ class BamboozleApp {
                 }
             }
         } else if (camFeed) {
+            this._releaseStreams(camFeed);
             camFeed.remove();
         }
     }
